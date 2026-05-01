@@ -51,7 +51,11 @@
   },
   "main": "dist/main.js",
   "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": ""
+  "author": "程凌云 <chenglyclyccc@gmail.com>",
+  "license": "MIT",
+  "description": "智慧社区管理端 API（与 intelligent-community 小程序配套）",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Eric2636/intelligent-community-admin.git"
+  }
 }

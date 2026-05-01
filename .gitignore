@@ -1,0 +1,9 @@
+node_modules
+cloudfunctions/**/node_modules
+dist
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+.idea

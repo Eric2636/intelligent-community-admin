@@ -1,0 +1,379 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  openid    String   @unique
+  name      String?
+  avatar    String?
+  gender    Int      @default(2)
+  birth     String?
+  address   Json?
+  photos    Json?
+  brief     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model AdminUser {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  passwordHash String
+  role         AdminRole @default(ADMIN)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+}
+
+model Task {
+  id            String     @id @default(cuid())
+  title         String
+  desc          String     @db.Text
+  images        Json?
+  videos        Json?
+  reward        String?
+  location      Json?
+  status        TaskStatus @default(PENDING_TAKE)
+  publisherId   String
+  publisherName String?
+  takerId       String?
+  takerName     String?
+  proofText     String?    @db.Text
+  proofImages   Json?
+  createdAt     DateTime   @default(now())
+  claimedAt     DateTime?
+  completedAt   DateTime?
+  confirmedAt   DateTime?
+
+  @@index([status, createdAt])
+  @@index([publisherId, createdAt])
+  @@index([takerId, claimedAt])
+}
+
+model Errand {
+  id           String       @id @default(cuid())
+  title        String
+  content      String       @db.Text
+  images       Json?
+  videos       Json?
+  reward       String?
+  status       ErrandStatus @default(PENDING_TAKE)
+  authorId     String
+  authorName   String?
+  claimerId    String?
+  claimerName  String?
+  pinned       Boolean      @default(false)
+  viewCount    Int          @default(0)
+  likeCount    Int          @default(0)
+  replyCount   Int          @default(0)
+  createdAt    DateTime     @default(now())
+  claimedAt    DateTime?
+  completedAt  DateTime?
+
+  replies   ErrandReply[]
+  likes     ErrandLike[]
+  favorites ErrandFavorite[]
+
+  @@index([status, createdAt])
+  @@index([authorId, createdAt])
+  @@index([claimerId, claimedAt])
+  @@index([pinned, createdAt])
+}
+
+model ErrandReply {
+  id         String   @id @default(cuid())
+  errandId   String
+  authorId   String
+  authorName String?
+  content    String   @db.Text
+  createdAt  DateTime @default(now())
+
+  errand Errand @relation(fields: [errandId], references: [id], onDelete: Cascade)
+
+  @@index([errandId, createdAt])
+}
+
+model ErrandLike {
+  id        String   @id @default(cuid())
+  errandId  String
+  userId    String
+  createdAt DateTime @default(now())
+
+  errand Errand @relation(fields: [errandId], references: [id], onDelete: Cascade)
+
+  @@unique([errandId, userId])
+  @@index([userId, createdAt])
+}
+
+model ErrandFavorite {
+  id        String   @id @default(cuid())
+  errandId  String
+  userId    String
+  createdAt DateTime @default(now())
+
+  errand Errand @relation(fields: [errandId], references: [id], onDelete: Cascade)
+
+  @@unique([errandId, userId])
+  @@index([userId, createdAt])
+}
+
+/// 小区留言（论坛帖子），对应小程序 forumAPI / api/posts
+model ForumPost {
+  id           String   @id @default(cuid())
+  title        String
+  content      String   @db.Text
+  images       Json?
+  videos       Json?
+  authorId     String
+  authorName   String?
+  authorAvatar String?
+  pinned       Boolean  @default(false)
+  viewCount    Int      @default(0)
+  likeCount    Int      @default(0)
+  replyCount   Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  replies   ForumReply[]
+  likes     ForumPostLike[]
+  favorites ForumPostFavorite[]
+
+  @@index([pinned, createdAt])
+  @@index([authorId, createdAt])
+  @@map("forum_posts")
+}
+
+model ForumReply {
+  id                String    @id @default(cuid())
+  postId            String
+  parentReplyId     String?
+  /// 被回复人昵称快照（楼中楼展示「回复 @xxx」）
+  replyToAuthorName String?
+  authorId          String
+  authorName        String?
+  content           String    @db.Text
+  images            Json?
+  videos            Json?
+  likeCount         Int       @default(0)
+  favoriteCount     Int       @default(0)
+  createdAt         DateTime  @default(now())
+
+  post      ForumPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  parent    ForumReply?  @relation("ForumReplyThread", fields: [parentReplyId], references: [id], onDelete: Cascade)
+  children  ForumReply[] @relation("ForumReplyThread")
+  likes     ForumReplyLike[]
+  favorites ForumReplyFavorite[]
+  reactions ForumReplyReaction[]
+
+  @@index([postId, createdAt])
+  @@index([parentReplyId, createdAt])
+  @@map("forum_replies")
+}
+
+model ForumReplyLike {
+  id        String   @id @default(cuid())
+  replyId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  reply ForumReply @relation(fields: [replyId], references: [id], onDelete: Cascade)
+
+  @@unique([replyId, userId])
+  @@index([userId, createdAt])
+  @@map("forum_reply_likes")
+}
+
+model ForumReplyFavorite {
+  id        String   @id @default(cuid())
+  replyId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  reply ForumReply @relation(fields: [replyId], references: [id], onDelete: Cascade)
+
+  @@unique([replyId, userId])
+  @@index([userId, createdAt])
+  @@map("forum_reply_favorites")
+}
+
+/// 每条评论每用户最多一个表情（可更换）
+model ForumReplyReaction {
+  id        String   @id @default(cuid())
+  replyId   String
+  userId    String
+  emoji     String   @db.VarChar(32)
+  createdAt DateTime @default(now())
+
+  reply ForumReply @relation(fields: [replyId], references: [id], onDelete: Cascade)
+
+  @@unique([replyId, userId])
+  @@index([replyId, emoji])
+  @@map("forum_reply_reactions")
+}
+
+model ForumPostLike {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  post ForumPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+  @@index([userId, createdAt])
+  @@map("forum_post_likes")
+}
+
+model ForumPostFavorite {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  post ForumPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+  @@index([userId, createdAt])
+  @@map("forum_post_favorites")
+}
+
+model AppSettingTab {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  icon      String   @default("")
+  enabled   Boolean  @default(true)
+  always    Boolean  @default(false)
+  labelEnc  String?
+  label     String?
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([order])
+}
+
+/// 小区市场商品，对应小程序 mallAPI / api/items
+model MallItem {
+  id           String   @id @default(cuid())
+  categoryId   String
+  title        String
+  price        String?
+  unit         String   @default("元")
+  desc         String   @db.Text
+  contact      String?
+  /// 主图（用于列表封面 + 详情轮播），最多 6 张（后端校验）
+  mainImages   Json?
+  /// 副图（用于详情轮播），与主图合计最多 6 张（后端校验）
+  subImages    Json?
+  /// 视频列表（用于详情展示），数量/大小由上传层控制
+  videos       Json?
+  /// 兼容旧字段（历史数据可能仍写入该字段）
+  images       Json?
+  publisherId  String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+
+  favorites MallItemFavorite[]
+  orders    MallOrder[]
+  comments  MallItemComment[]
+
+  @@index([categoryId, createdAt])
+  @@index([publisherId, createdAt])
+  @@map("mall_items")
+}
+
+/// 小区市场商品评论
+model MallItemComment {
+  id        String   @id @default(cuid())
+  itemId    String
+  userId    String
+  /// 楼中楼：仅允许回复「主评论」（parentId 为空的那条）
+  parentId  String?
+  /// 被回复人昵称快照（展示「回复 @xxx」）
+  replyToAuthorName String?
+  content   String   @db.Text
+  images    Json?
+  createdAt DateTime @default(now())
+
+  item     MallItem            @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  parent   MallItemComment?    @relation("MallItemCommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  children MallItemComment[]   @relation("MallItemCommentThread")
+  likes    MallItemCommentLike[]
+
+  @@index([itemId, parentId, createdAt])
+  @@index([itemId, createdAt])
+  @@index([userId, createdAt])
+  @@map("mall_item_comments")
+}
+
+model MallItemCommentLike {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  comment MallItemComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId])
+  @@index([userId, createdAt])
+  @@map("mall_item_comment_likes")
+}
+
+model MallItemFavorite {
+  id        String   @id @default(cuid())
+  itemId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  item MallItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, userId])
+  @@index([userId, createdAt])
+  @@map("mall_item_favorites")
+}
+
+/// pending | completed | cancelled（与小程序订单状态一致）
+model MallOrder {
+  id         String   @id @default(cuid())
+  itemId     String
+  itemTitle  String
+  itemPrice  String?
+  itemUnit   String   @default("元")
+  sellerId   String
+  buyerId    String
+  contact    String?
+  status     String   @default("pending")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  item MallItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@index([buyerId, createdAt])
+  @@index([sellerId, createdAt])
+  @@index([status, createdAt])
+  @@map("mall_orders")
+}
+
+enum AdminRole {
+  ADMIN
+  SUPERADMIN
+}
+
+enum TaskStatus {
+  DRAFT
+  PENDING_TAKE
+  IN_PROGRESS
+  PENDING_CONFIRM
+  COMPLETED
+  CANCELLED
+}
+
+enum ErrandStatus {
+  PENDING_TAKE
+  IN_PROGRESS
+  COMPLETED
+}

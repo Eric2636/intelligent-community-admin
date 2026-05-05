@@ -27,7 +27,7 @@ export class MallItemService {
     const k = keyword?.trim() || '';
     const cacheKey = await mallItemsListCacheKey(categoryId, k, orderBy);
     return cacheAsideJson(cacheKey, MALL_LIST_TTL_SEC, async () => {
-      const where: Prisma.MallItemWhereInput = {};
+      const where: Prisma.MallItemWhereInput = { visibility: 'ONLINE' };
       if (categoryId && categoryId !== 'all') {
         where.categoryId = categoryId;
       }
@@ -57,7 +57,7 @@ export class MallItemService {
     if (!id) throw new HttpError(400, '商品 id 不能为空');
 
     const base = await cacheAsideJson(mallItemDetailCacheKey(id), MALL_ITEM_DETAIL_TTL_SEC, async () => {
-      const row = await prisma.mallItem.findUnique({ where: { id } });
+      const row = await prisma.mallItem.findFirst({ where: { id, visibility: 'ONLINE' } });
       if (!row) throw new HttpError(404, '商品不存在');
       return serializeMallItem(row);
     });
@@ -116,7 +116,7 @@ export class MallItemService {
 
   async getMyItems(params: { userId: string }) {
     const rows = await prisma.mallItem.findMany({
-      where: { publisherId: params.userId },
+      where: { publisherId: params.userId, visibility: 'ONLINE' },
       orderBy: { createdAt: 'desc' },
     });
     return rows.map((r) => serializeMallItem(r));

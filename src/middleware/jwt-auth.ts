@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import Koa = require('koa');
+import { prisma } from '../lib/prisma';
 
 export type AuthedUser = { userId: string; openid: string };
 
@@ -58,6 +59,23 @@ export async function jwtAuth(ctx: Koa.Context, next: Koa.Next) {
       ...(process.env.NODE_ENV === 'production' ? {} : { debugMessage: errMsg, debugInfo }),
     };
     return;
+  }
+
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(ctx.method)) {
+    const user = await prisma.user.findUnique({
+      where: { id: ctx.state.user.userId },
+      select: { enabled: true },
+    });
+    if (!user) {
+      ctx.status = 401;
+      ctx.body = { statusCode: 401, message: '用户不存在' };
+      return;
+    }
+    if (!user.enabled) {
+      ctx.status = 403;
+      ctx.body = { statusCode: 403, message: '账号已被冻结，暂不能进行发布、评论、点赞等操作' };
+      return;
+    }
   }
 
   // 注意：业务处理里的异常应交给 errorHandler 返回 4xx/5xx，不应被当作鉴权失败吞掉

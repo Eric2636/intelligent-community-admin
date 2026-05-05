@@ -9,17 +9,22 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  openid    String   @unique
-  name      String?
-  avatar    String?
-  gender    Int      @default(2)
-  birth     String?
-  address   Json?
-  photos    Json?
-  brief     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  id             String    @id @default(cuid())
+  openid         String    @unique
+  name           String?
+  avatar         String?
+  gender         Int       @default(2)
+  birth          String?
+  address        Json?
+  photos         Json?
+  brief          String?
+  enabled        Boolean   @default(true)
+  disabledAt     DateTime?
+  disabledReason String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now()) @updatedAt
+
+  @@index([enabled, createdAt])
 }
 
 model AdminUser {
@@ -27,8 +32,14 @@ model AdminUser {
   username     String    @unique
   passwordHash String
   role         AdminRole @default(ADMIN)
+  type         AdminType @default(OFFICIAL)
+  orgName      String?
+  enabled      Boolean   @default(true)
+  lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @default(now()) @updatedAt
+
+  @@index([role, enabled])
 }
 
 model Task {
@@ -40,6 +51,8 @@ model Task {
   reward        String?
   location      Json?
   status        TaskStatus @default(PENDING_TAKE)
+  visibility    ContentVisibility @default(ONLINE)
+  pinned        Boolean    @default(false)
   publisherId   String
   publisherName String?
   takerId       String?
@@ -52,6 +65,7 @@ model Task {
   confirmedAt   DateTime?
 
   @@index([status, createdAt])
+  @@index([visibility, pinned, createdAt])
   @@index([publisherId, createdAt])
   @@index([takerId, claimedAt])
 }
@@ -64,6 +78,7 @@ model Errand {
   videos       Json?
   reward       String?
   status       ErrandStatus @default(PENDING_TAKE)
+  visibility   ContentVisibility @default(ONLINE)
   authorId     String
   authorName   String?
   claimerId    String?
@@ -81,6 +96,7 @@ model Errand {
   favorites ErrandFavorite[]
 
   @@index([status, createdAt])
+  @@index([visibility, pinned, createdAt])
   @@index([authorId, createdAt])
   @@index([claimerId, claimedAt])
   @@index([pinned, createdAt])
@@ -133,6 +149,7 @@ model ForumPost {
   authorId     String
   authorName   String?
   authorAvatar String?
+  visibility   ContentVisibility @default(ONLINE)
   pinned       Boolean  @default(false)
   viewCount    Int      @default(0)
   likeCount    Int      @default(0)
@@ -144,6 +161,7 @@ model ForumPost {
   favorites ForumPostFavorite[]
 
   @@index([pinned, createdAt])
+  @@index([visibility, pinned, createdAt])
   @@index([authorId, createdAt])
   @@map("forum_posts")
 }
@@ -275,6 +293,8 @@ model MallItem {
   /// 兼容旧字段（历史数据可能仍写入该字段）
   images       Json?
   publisherId  String
+  visibility   ContentVisibility @default(ONLINE)
+  pinned       Boolean  @default(false)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @default(now()) @updatedAt
 
@@ -283,6 +303,7 @@ model MallItem {
   comments  MallItemComment[]
 
   @@index([categoryId, createdAt])
+  @@index([visibility, pinned, createdAt])
   @@index([publisherId, createdAt])
   @@map("mall_items")
 }
@@ -362,6 +383,16 @@ model MallOrder {
 enum AdminRole {
   ADMIN
   SUPERADMIN
+}
+
+enum AdminType {
+  OFFICIAL
+  THIRD_PARTY
+}
+
+enum ContentVisibility {
+  ONLINE
+  OFFLINE
 }
 
 enum TaskStatus {

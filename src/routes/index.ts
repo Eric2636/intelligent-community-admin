@@ -27,8 +27,11 @@ import { UpdateMeDto } from '../modules/user/user.dto';
 import { UserService } from '../modules/user/user.service';
 import { parseDto } from '../validate';
 import { jsonBody } from './json-body';
+import { registerAdminRoutes } from './admin.routes';
 import { registerMallRoutes } from './mall.routes';
+import { AdminService } from '../modules/admin/admin.service';
 
+const adminService = new AdminService();
 const authService = new AuthService();
 const userService = new UserService();
 const taskService = new TaskService();
@@ -44,6 +47,8 @@ export function createRouter() {
   router.get('/api/health', (ctx) => {
     ctx.body = { ok: true };
   });
+
+  registerAdminRoutes(router, adminService);
 
   router.post('/api/auth/wechat/login', async (ctx) => {
     const dto = await parseDto(WechatLoginDto, jsonBody(ctx));

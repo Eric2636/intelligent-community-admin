@@ -125,7 +125,10 @@ export class MallCommentService {
       throw new HttpError(400, '评论内容或图片至少填写一项');
     }
 
-    const exists = await prisma.mallItem.findUnique({ where: { id: itemId }, select: { id: true } });
+    const exists = await prisma.mallItem.findFirst({
+      where: { id: itemId, visibility: 'ONLINE' },
+      select: { id: true },
+    });
     if (!exists) throw new HttpError(404, '商品不存在');
 
     let parentId: string | null = null;

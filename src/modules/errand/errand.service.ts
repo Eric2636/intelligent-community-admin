@@ -53,8 +53,9 @@ export class ErrandService {
       ? { OR: [{ title: { contains: k } }, { content: { contains: k } }] }
       : {};
 
-    const pinnedWhere: Prisma.ErrandWhereInput = { pinned: true, ...textFilter };
-    const listWhere: Prisma.ErrandWhereInput = { pinned: false, ...textFilter };
+    const visibleWhere: Prisma.ErrandWhereInput = { visibility: 'ONLINE', ...textFilter };
+    const pinnedWhere: Prisma.ErrandWhereInput = { pinned: true, ...visibleWhere };
+    const listWhere: Prisma.ErrandWhereInput = { pinned: false, ...visibleWhere };
 
     const orderBy =
       params.orderBy === 'hot'
@@ -108,7 +109,7 @@ export class ErrandService {
     if (!id) throw new HttpError(400, 'errandId 不能为空');
 
     const row = await prisma.$transaction(async (tx) => {
-      const exists = await tx.errand.findUnique({ where: { id } });
+      const exists = await tx.errand.findFirst({ where: { id, visibility: 'ONLINE' } });
       if (!exists) return null;
       await tx.errand.update({ where: { id }, data: { viewCount: { increment: 1 } } });
       return tx.errand.findUnique({ where: { id } });
@@ -182,7 +183,7 @@ export class ErrandService {
     if (!id) throw new HttpError(400, 'errandId 不能为空');
 
     return prisma.$transaction(async (tx) => {
-      const row = await tx.errand.findUnique({ where: { id } });
+      const row = await tx.errand.findFirst({ where: { id, visibility: 'ONLINE' } });
       if (!row) throw new HttpError(404, '跑腿不存在');
       if (row.authorId === params.userId) throw new HttpError(400, '不能领取自己发布的跑腿');
       if (row.status !== 'PENDING_TAKE') throw new HttpError(400, '该跑腿已被领取或已结束');
@@ -207,7 +208,7 @@ export class ErrandService {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
 
-    const row = await prisma.errand.findUnique({ where: { id } });
+    const row = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' } });
     if (!row) throw new HttpError(404, '跑腿不存在');
     if (row.authorId !== params.userId) throw new HttpError(403, '仅发布者可确认完成');
     if (row.status !== 'IN_PROGRESS') throw new HttpError(400, '该跑腿当前不可确认完成');
@@ -225,7 +226,7 @@ export class ErrandService {
     if (!id) throw new HttpError(400, 'errandId 不能为空');
     if (!content) throw new HttpError(400, '请输入回复');
 
-    const errand = await prisma.errand.findUnique({ where: { id } });
+    const errand = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' } });
     if (!errand) throw new HttpError(404, '跑腿不存在');
 
     const authorName = await this.getUserDisplayName(params.userId);
@@ -247,6 +248,8 @@ export class ErrandService {
   async like(params: { userId: string; errandId: string }) {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
+    const exists = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    if (!exists) throw new HttpError(404, '跑腿不存在');
     try {
       await prisma.errandLike.create({ data: { errandId: id, userId: params.userId } });
       const updated = await prisma.errand.update({ where: { id }, data: { likeCount: { increment: 1 } } });
@@ -261,6 +264,8 @@ export class ErrandService {
   async unlike(params: { userId: string; errandId: string }) {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
+    const exists = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    if (!exists) throw new HttpError(404, '跑腿不存在');
     try {
       await prisma.errandLike.delete({ where: { errandId_userId: { errandId: id, userId: params.userId } } });
       const updated = await prisma.errand.update({
@@ -277,6 +282,8 @@ export class ErrandService {
   async favorite(params: { userId: string; errandId: string }) {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
+    const exists = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    if (!exists) throw new HttpError(404, '跑腿不存在');
     try {
       await prisma.errandFavorite.create({ data: { errandId: id, userId: params.userId } });
     } catch {
@@ -288,6 +295,8 @@ export class ErrandService {
   async unfavorite(params: { userId: string; errandId: string }) {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
+    const exists = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    if (!exists) throw new HttpError(404, '跑腿不存在');
     try {
       await prisma.errandFavorite.delete({ where: { errandId_userId: { errandId: id, userId: params.userId } } });
     } catch {
@@ -300,7 +309,10 @@ export class ErrandService {
     const role = params.role || 'published';
     const where =
       role === 'claimed' ? { claimerId: params.userId } : { authorId: params.userId };
-    const rows = await prisma.errand.findMany({ where, orderBy: { createdAt: 'desc' } });
+    const rows = await prisma.errand.findMany({
+      where: { ...where, visibility: 'ONLINE' },
+      orderBy: { createdAt: 'desc' },
+    });
 
     const ids = rows.map((r) => r.id);
     const [liked, favorited] = await Promise.all([

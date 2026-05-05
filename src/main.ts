@@ -6,11 +6,13 @@ import bodyParser from 'koa-bodyparser';
 import { koaSwagger } from 'koa2-swagger-ui';
 import { prisma } from './lib/prisma';
 import { errorHandler } from './middleware/error-handler';
+import { AdminService } from './modules/admin/admin.service';
 import { createRouter } from './routes';
 import { openApiDocument } from './swagger/openapi';
 
 async function bootstrap() {
   await prisma.$connect();
+  await new AdminService().ensureDefaultSuperAdmin();
 
   const app = new Koa();
   app.use(errorHandler);

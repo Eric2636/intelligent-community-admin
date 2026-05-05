@@ -23,6 +23,8 @@ export function serializeMallItem(
     videos: Prisma.JsonValue | null;
     images: Prisma.JsonValue | null;
     publisherId: string;
+    visibility?: string;
+    pinned?: boolean;
     createdAt: Date;
     updatedAt: Date;
   },
@@ -60,6 +62,8 @@ export function serializeMallItem(
     // 兼容字段：把主图+副图合并输出
     images: allImages,
     publisherId: row.publisherId,
+    visibility: row.visibility ?? 'ONLINE',
+    pinned: Boolean(row.pinned),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

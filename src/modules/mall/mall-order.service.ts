@@ -16,7 +16,7 @@ export class MallOrderService {
       throw new HttpError(400, '不能购买自己发布的商品');
     }
 
-    const item = await prisma.mallItem.findUnique({ where: { id: params.itemId } });
+    const item = await prisma.mallItem.findFirst({ where: { id: params.itemId, visibility: 'ONLINE' } });
     if (!item) throw new HttpError(404, '商品不存在');
     if (item.publisherId !== params.sellerId) {
       throw new HttpError(400, '卖家信息与商品不一致');

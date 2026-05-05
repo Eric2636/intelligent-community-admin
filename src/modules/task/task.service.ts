@@ -16,7 +16,7 @@ export class TaskService {
   async getTaskDetail(taskId: string) {
     const id = String(taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
-    const row = await prisma.task.findUnique({ where: { id } });
+    const row = await prisma.task.findFirst({ where: { id, visibility: 'ONLINE' } });
     if (!row) throw new HttpError(404, '任务不存在');
     return this.mapTask(row);
   }
@@ -150,6 +150,7 @@ export class TaskService {
 
       const where: Prisma.TaskWhereInput = {
         status: 'PENDING_TAKE',
+        visibility: 'ONLINE',
       };
 
       if (keyword && keyword.trim()) {
@@ -261,6 +262,8 @@ export class TaskService {
     reward: string | null;
     location: unknown;
     status: string;
+    visibility?: string;
+    pinned?: boolean;
     publisherId: string;
     publisherName: string | null;
     takerId: string | null;
@@ -281,6 +284,8 @@ export class TaskService {
       reward: t.reward ?? '',
       location: t.location ?? null,
       status: this.mapStatus(t.status),
+      visibility: t.visibility ?? 'ONLINE',
+      pinned: Boolean(t.pinned),
       publisherId: t.publisherId,
       publisherName: t.publisherName ?? '',
       takerId: t.takerId ?? '',

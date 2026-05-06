@@ -39,9 +39,12 @@ export function serializeMallItem(
   const subImages = Array.isArray(row.subImages) ? (row.subImages as unknown[]).filter((x) => typeof x === 'string') : [];
   const videos = Array.isArray(row.videos) ? (row.videos as unknown[]).filter((x) => typeof x === 'string') : [];
 
-  // 兼容：若新字段为空，但旧 images 有值，则视为主图
-  const normalizedMainImages = mainImages.length ? mainImages : legacyImages;
-  const normalizedSubImages = mainImages.length ? subImages : [];
+  // 兼容：若新字段为空，但旧 images 有值，则首张视为主图
+  const mainRaw = mainImages.length ? mainImages : legacyImages;
+  const subRaw = mainImages.length ? subImages : [];
+  // 主图仅一张：历史多条主图或旧 images 多图时，首张为主图，其余并入副图
+  const normalizedMainImages = mainRaw.slice(0, 1);
+  const normalizedSubImages = mainRaw.slice(1).concat(subRaw);
   const coverImage = normalizedMainImages[0] || normalizedSubImages[0] || '';
 
   const allImages = normalizedMainImages.concat(normalizedSubImages);

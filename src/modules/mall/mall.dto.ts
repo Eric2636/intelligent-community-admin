@@ -1,4 +1,4 @@
-import { IsArray, IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 export class GetMallItemsQueryDto {
   @IsOptional()
@@ -47,6 +47,7 @@ export class PublishMallItemDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(1)
   @IsString({ each: true })
   mainImages?: string[];
 

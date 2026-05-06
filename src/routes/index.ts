@@ -48,7 +48,7 @@ export function createRouter() {
     ctx.body = { ok: true };
   });
 
-  registerAdminRoutes(router, adminService);
+  registerAdminRoutes(router, adminService, settingsService);
 
   router.post('/api/auth/wechat/login', async (ctx) => {
     const dto = await parseDto(WechatLoginDto, jsonBody(ctx));

@@ -83,16 +83,16 @@ export class MallItemService {
     images?: string[]; // legacy
   }) {
     const legacyImages = parseStrictMediaUrlList(params.images, 9, 'image', 'images');
-    const mainImages = parseStrictMediaUrlList(params.mainImages, 6, 'image', 'mainImages');
+    const mainImages = parseStrictMediaUrlList(params.mainImages, 1, 'image', 'mainImages');
     const subImages = parseStrictMediaUrlList(params.subImages, 6, 'image', 'subImages');
     const videos = parseStrictMediaUrlList(params.videos, 2, 'video', 'videos');
 
-    const imgTotal = mainImages.length + subImages.length;
-    if (imgTotal > 6) throw new HttpError(400, '图片最多上传 6 张（主图+副图合计）');
+    // 兼容：若新字段没传，但旧 images 有值：首张为主图，其余并入副图（合计仍最多 6 张）
+    const normalizedMainImages = mainImages.length ? mainImages : legacyImages.slice(0, 1);
+    const normalizedSubImages = mainImages.length ? subImages : legacyImages.slice(1, 6);
 
-    // 兼容：若新字段没传，但旧 images 有值，则当作主图
-    const normalizedMainImages = mainImages.length ? mainImages : legacyImages.slice(0, 6);
-    const normalizedSubImages = mainImages.length ? subImages : [];
+    const imgTotal = normalizedMainImages.length + normalizedSubImages.length;
+    if (imgTotal > 6) throw new HttpError(400, '图片最多上传 6 张（主图+副图合计）');
 
     const row = await prisma.mallItem.create({
       data: {

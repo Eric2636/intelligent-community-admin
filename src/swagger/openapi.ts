@@ -159,7 +159,7 @@ export const openApiDocument: Record<string, unknown> = {
           unit: { type: 'string', maxLength: 16 },
           desc: { type: 'string', minLength: 1, maxLength: 8000 },
           contact: { type: 'string', maxLength: 500 },
-          mainImages: { type: 'array', items: { type: 'string' } },
+          mainImages: { type: 'array', maxItems: 1, items: { type: 'string' }, description: '列表主图，仅 1 张' },
           subImages: { type: 'array', items: { type: 'string' } },
           videos: { type: 'array', items: { type: 'string' } },
           images: { type: 'array', items: { type: 'string' }, description: '兼容旧字段' },
@@ -889,6 +889,53 @@ export const openApiDocument: Record<string, unknown> = {
         tags: ['Settings'],
         summary: '首页模块入口 Tab 配置',
         security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'OK',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/JsonSuccess' } } },
+          },
+        },
+      },
+    },
+    '/api/admin/app-settings/module-entry-tabs': {
+      get: {
+        tags: ['Settings'],
+        summary: '（超管）小程序模块入口开关列表',
+        description: '管理端 JWT（ADMIN_JWT_SECRET），需超级管理员',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'OK',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/JsonSuccess' } } },
+          },
+        },
+      },
+    },
+    '/api/admin/app-settings/module-entry-tabs/{key}': {
+      patch: {
+        tags: ['Settings'],
+        summary: '（超管）更新某模块是否在小程序展示',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          {
+            name: 'key',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', example: 'mall' },
+          },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['enabled'],
+                properties: { enabled: { type: 'boolean' } },
+              },
+            },
+          },
+        },
         responses: {
           '200': {
             description: 'OK',

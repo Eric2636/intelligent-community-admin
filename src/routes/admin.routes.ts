@@ -11,6 +11,8 @@ import {
   UpdateUserEnabledDto,
 } from '../modules/admin/admin.dto';
 import { AdminService } from '../modules/admin/admin.service';
+import { UpdateModuleTabEnabledDto } from '../modules/settings/settings.dto';
+import { SettingsService } from '../modules/settings/settings.service';
 import { parseDto } from '../validate';
 import { jsonBody } from './json-body';
 
@@ -23,7 +25,11 @@ function pageOf(q: { page?: number; pageSize?: number }) {
   };
 }
 
-export function registerAdminRoutes(router: Router, adminService: AdminService) {
+export function registerAdminRoutes(
+  router: Router,
+  adminService: AdminService,
+  settingsService: SettingsService,
+) {
   router.post('/api/admin/auth/login', async (ctx) => {
     const dto = await parseDto(AdminLoginDto, jsonBody(ctx));
     ctx.body = { code: 200, data: await adminService.login(dto.username, dto.password) };
@@ -172,5 +178,17 @@ export function registerAdminRoutes(router: Router, adminService: AdminService) 
         pinned: dto.pinned,
       }),
     };
+  });
+
+  router.get('/api/admin/app-settings/module-entry-tabs', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    ctx.body = { code: 200, data: await settingsService.listModuleEntryTabsForAdmin() };
+  });
+
+  router.patch('/api/admin/app-settings/module-entry-tabs/:key', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const key = String((ctx.params as { key?: string }).key || '').trim();
+    const dto = await parseDto(UpdateModuleTabEnabledDto, jsonBody(ctx));
+    ctx.body = { code: 200, data: await settingsService.setModuleTabEnabled(key, dto.enabled) };
   });
 }

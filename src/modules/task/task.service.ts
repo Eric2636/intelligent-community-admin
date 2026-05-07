@@ -161,7 +161,7 @@ export class TaskService {
 
       const rows = await prisma.task.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
         skip,
         take: pageSize,
       });

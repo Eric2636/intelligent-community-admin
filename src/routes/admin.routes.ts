@@ -17,10 +17,13 @@ import {
 import { AdminService } from '../modules/admin/admin.service';
 import { UpdateModuleTabEnabledDto } from '../modules/settings/settings.dto';
 import { SettingsService } from '../modules/settings/settings.service';
+import { CosCredentialsDto } from '../modules/upload/upload.dto';
+import { UploadService } from '../modules/upload/upload.service';
 import { parseDto } from '../validate';
 import { jsonBody } from './json-body';
 
 const contentTypes = new Set(['errands', 'posts', 'items', 'tasks']);
+const uploadService = new UploadService();
 
 function pageOf(q: { page?: number; pageSize?: number }) {
   return {
@@ -354,6 +357,18 @@ export function registerAdminRoutes(
         },
         ctx.state.admin,
       ),
+    };
+  });
+
+  router.post('/api/admin/upload/cos/credentials', adminAuth, async (ctx) => {
+    const dto = await parseDto(CosCredentialsDto, jsonBody(ctx));
+    ctx.body = {
+      code: 200,
+      data: await uploadService.getStsCredentials({
+        userId: ctx.state.admin.adminId,
+        module: dto.module,
+        type: dto.type,
+      }),
     };
   });
 

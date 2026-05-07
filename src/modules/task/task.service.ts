@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
+import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import {
@@ -16,7 +17,7 @@ export class TaskService {
   async getTaskDetail(taskId: string) {
     const id = String(taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
-    const row = await prisma.task.findFirst({ where: { id, visibility: 'ONLINE' } });
+    const row = await prisma.task.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
     if (!row) throw new HttpError(404, '任务不存在');
     return this.mapTask(row);
   }
@@ -103,7 +104,7 @@ export class TaskService {
 
     const id = params.taskId ? String(params.taskId).trim() : '';
     if (id) {
-      const row = await prisma.task.findUnique({ where: { id } });
+      const row = await prisma.task.findFirst({ where: { id, ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '草稿不存在');
       if (row.publisherId !== params.userId) throw new HttpError(403, '仅发布者可编辑草稿');
       if (row.status !== 'DRAFT') throw new HttpError(400, '仅草稿可编辑');
@@ -119,7 +120,7 @@ export class TaskService {
     const id = String(params.taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
     return prisma.$transaction(async (tx) => {
-      const row = await tx.task.findUnique({ where: { id } });
+      const row = await tx.task.findFirst({ where: { id, ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '任务不存在');
       if (row.publisherId !== params.userId) throw new HttpError(403, '仅发布者可发布');
       if (row.status !== 'DRAFT') throw new HttpError(400, '仅草稿可发布');
@@ -151,6 +152,7 @@ export class TaskService {
       const where: Prisma.TaskWhereInput = {
         status: 'PENDING_TAKE',
         visibility: 'ONLINE',
+        ...contentNotDeleted,
       };
 
       if (keyword && keyword.trim()) {
@@ -172,7 +174,7 @@ export class TaskService {
     const id = String(params.taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
     return prisma.$transaction(async (tx) => {
-      const row = await tx.task.findUnique({ where: { id } });
+      const row = await tx.task.findFirst({ where: { id, ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '任务不存在');
       if (row.publisherId !== params.userId) throw new HttpError(403, '仅发布者可撤销发布');
       if (row.status !== 'PENDING_TAKE') throw new HttpError(400, '该任务当前不可撤销发布');
@@ -192,7 +194,7 @@ export class TaskService {
     const id = String(params.taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
     return prisma.$transaction(async (tx) => {
-      const row = await tx.task.findUnique({ where: { id } });
+      const row = await tx.task.findFirst({ where: { id, ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '任务不存在');
       if (row.publisherId !== params.userId) throw new HttpError(403, '仅发布者可重新发布');
       if (row.status !== 'CANCELLED') throw new HttpError(400, '仅已撤销的任务可重新发布');
@@ -212,7 +214,7 @@ export class TaskService {
     const id = String(params.taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
     return prisma.$transaction(async (tx) => {
-      const row = await tx.task.findUnique({ where: { id } });
+      const row = await tx.task.findFirst({ where: { id, ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '任务不存在');
       if (row.publisherId !== params.userId) throw new HttpError(403, '仅发布者可删除');
       // 未发布：草稿；或已撤销且无人领取
@@ -220,7 +222,10 @@ export class TaskService {
         throw new HttpError(400, '仅草稿/已撤销的任务可删除');
       }
       if (row.takerId) throw new HttpError(400, '已被领取的任务不可删除');
-      await tx.task.delete({ where: { id } });
+      await tx.task.update({ where: { id }, data: { deletedAt: new Date() } });
+      return { ok: true };
+    }).then(async () => {
+      await invalidatePendingTasksListCache();
       return { ok: true };
     });
   }
@@ -229,7 +234,7 @@ export class TaskService {
     const id = String(params.taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
     return prisma.$transaction(async (tx) => {
-      const row = await tx.task.findUnique({ where: { id } });
+      const row = await tx.task.findFirst({ where: { id, ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '任务不存在');
       if (row.takerId !== params.userId) throw new HttpError(403, '仅接单人可放弃任务');
       if (row.status !== 'IN_PROGRESS') throw new HttpError(400, '该任务当前不可放弃');
@@ -266,6 +271,7 @@ export class TaskService {
     pinned?: boolean;
     publisherId: string;
     publisherName: string | null;
+    adminLabel?: string | null;
     takerId: string | null;
     takerName: string | null;
     proofText: string | null;
@@ -288,6 +294,7 @@ export class TaskService {
       pinned: Boolean(t.pinned),
       publisherId: t.publisherId,
       publisherName: t.publisherName ?? '',
+      adminLabel: t.adminLabel ?? '',
       takerId: t.takerId ?? '',
       takerName: t.takerName ?? '',
       proofText: t.proofText ?? '',

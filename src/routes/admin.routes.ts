@@ -2,8 +2,12 @@ import Router from '@koa/router';
 import { adminAuth, requireSuperAdmin } from '../middleware/admin-auth';
 import {
   AdminContentQueryDto,
+  AdminCreateContentDto,
   AdminListQueryDto,
   AdminLoginDto,
+  AdminChangeMyPasswordDto,
+  AdminSystemLogQueryDto,
+  AdminUpdateContentDto,
   BatchUpdateContentStateDto,
   CreateAdminUserDto,
   UpdateAdminUserDto,
@@ -30,13 +34,45 @@ export function registerAdminRoutes(
   adminService: AdminService,
   settingsService: SettingsService,
 ) {
+  router.get('/api/admin/auth/captcha', async (ctx) => {
+    const data = await adminService.createLoginCaptcha();
+    ctx.body = { code: 200, data };
+  });
+
   router.post('/api/admin/auth/login', async (ctx) => {
     const dto = await parseDto(AdminLoginDto, jsonBody(ctx));
-    ctx.body = { code: 200, data: await adminService.login(dto.username, dto.password) };
+    // 登录安全：错误次数 / 验证码 / 30 分钟锁定（一次性扩展字段返回）
+    const res = await adminService.loginWithSecurity({
+      username: dto.username,
+      password: dto.password,
+      captchaId: dto.captchaId,
+      captchaCode: dto.captchaCode,
+      ip: ctx.ip,
+    });
+    if (!res.ok) {
+      ctx.status = res.statusCode;
+      ctx.body = res.body;
+      return;
+    }
+    ctx.body = { code: 200, data: res.data };
   });
 
   router.get('/api/admin/auth/me', adminAuth, async (ctx) => {
     ctx.body = { code: 200, data: await adminService.getMe(ctx.state.admin.adminId) };
+  });
+
+  router.post('/api/admin/auth/change-password', adminAuth, async (ctx) => {
+    const dto = await parseDto(AdminChangeMyPasswordDto, jsonBody(ctx));
+    ctx.body = { code: 200, data: await adminService.changeMyPassword(ctx.state.admin.adminId, dto.password) };
+  });
+
+  router.get('/api/admin/system-logs', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const q = await parseDto(AdminSystemLogQueryDto, ctx.query);
+    ctx.body = {
+      code: 200,
+      data: await adminService.listSystemLogs({ ...pageOf(q), keyword: q.keyword, action: q.action }),
+    };
   });
 
   router.get('/api/admin/users', adminAuth, async (ctx) => {
@@ -51,6 +87,13 @@ export function registerAdminRoutes(
     if (!requireSuperAdmin(ctx)) return;
     const userId = String((ctx.params as { userId?: string }).userId || '').trim();
     const dto = await parseDto(UpdateUserEnabledDto, jsonBody(ctx));
+    await adminService.writeSystemLog({
+      adminId: ctx.state.admin.adminId,
+      adminUsername: ctx.state.admin.username,
+      ip: ctx.ip,
+      action: 'USER_ENABLED_UPDATE',
+      detail: { userId, enabled: dto.enabled, reason: dto.reason ?? '' },
+    });
     ctx.body = {
       code: 200,
       data: await adminService.updateUserEnabled({
@@ -72,6 +115,13 @@ export function registerAdminRoutes(
     ctx.body = { code: 200, data };
   });
 
+  router.get('/api/admin/users-mini', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const idsRaw = String((ctx.query as any)?.ids || '').trim();
+    const ids = idsRaw ? idsRaw.split(',').map((x) => x.trim()).filter(Boolean) : [];
+    ctx.body = { code: 200, data: await adminService.listUsersMiniByIds({ ids }) };
+  });
+
   router.get('/api/admin/admin-users', adminAuth, async (ctx) => {
     if (!requireSuperAdmin(ctx)) return;
     const q = await parseDto(AdminListQueryDto, ctx.query);
@@ -84,6 +134,13 @@ export function registerAdminRoutes(
   router.post('/api/admin/admin-users', adminAuth, async (ctx) => {
     if (!requireSuperAdmin(ctx)) return;
     const dto = await parseDto(CreateAdminUserDto, jsonBody(ctx));
+    await adminService.writeSystemLog({
+      adminId: ctx.state.admin.adminId,
+      adminUsername: ctx.state.admin.username,
+      ip: ctx.ip,
+      action: 'ADMIN_CREATE',
+      detail: { username: dto.username, type: dto.type ?? 'OFFICIAL', orgName: dto.orgName ?? '' },
+    });
     ctx.body = {
       code: 200,
       data: await adminService.createAdmin({
@@ -91,6 +148,7 @@ export function registerAdminRoutes(
         password: dto.password,
         type: dto.type,
         orgName: dto.orgName,
+        boundUserId: dto.boundUserId,
       }),
     };
   });
@@ -99,6 +157,13 @@ export function registerAdminRoutes(
     if (!requireSuperAdmin(ctx)) return;
     const adminId = String((ctx.params as { adminId?: string }).adminId || '').trim();
     const dto = await parseDto(UpdateAdminUserDto, jsonBody(ctx));
+    await adminService.writeSystemLog({
+      adminId: ctx.state.admin.adminId,
+      adminUsername: ctx.state.admin.username,
+      ip: ctx.ip,
+      action: 'ADMIN_UPDATE',
+      detail: { adminId, enabled: dto.enabled, type: dto.type, orgName: dto.orgName, boundUserId: dto.boundUserId },
+    });
     ctx.body = {
       code: 200,
       data: await adminService.updateAdmin(ctx.state.admin.adminId, adminId, {
@@ -106,8 +171,54 @@ export function registerAdminRoutes(
         enabled: dto.enabled,
         type: dto.type,
         orgName: dto.orgName,
+        boundUserId: dto.boundUserId,
       }),
     };
+  });
+
+  router.delete('/api/admin/admin-users/:adminId', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const adminId = String((ctx.params as { adminId?: string }).adminId || '').trim();
+    await adminService.writeSystemLog({
+      adminId: ctx.state.admin.adminId,
+      adminUsername: ctx.state.admin.username,
+      ip: ctx.ip,
+      action: 'ADMIN_DELETE',
+      detail: { adminId },
+    });
+    ctx.body = {
+      code: 200,
+      data: await adminService.deleteAdmin(ctx.state.admin.adminId, adminId),
+    };
+  });
+
+  router.post('/api/admin/admin-users/:adminId/reset-password', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const adminId = String((ctx.params as { adminId?: string }).adminId || '').trim();
+    await adminService.writeSystemLog({
+      adminId: ctx.state.admin.adminId,
+      adminUsername: ctx.state.admin.username,
+      ip: ctx.ip,
+      action: 'ADMIN_RESET_PASSWORD',
+      detail: { adminId },
+    });
+    ctx.body = {
+      code: 200,
+      data: await adminService.superAdminResetRandomPassword(ctx.state.admin.adminId, adminId),
+    };
+  });
+
+  router.post('/api/admin/admin-users/:adminId/unlock-login', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const adminId = String((ctx.params as { adminId?: string }).adminId || '').trim();
+    await adminService.writeSystemLog({
+      adminId: ctx.state.admin.adminId,
+      adminUsername: ctx.state.admin.username,
+      ip: ctx.ip,
+      action: 'ADMIN_UNLOCK_LOGIN',
+      detail: { adminId },
+    });
+    ctx.body = { code: 200, data: await adminService.superAdminUnlockAdminLogin(adminId) };
   });
 
   router.get('/api/admin/contents/:type', adminAuth, async (ctx) => {
@@ -145,6 +256,62 @@ export function registerAdminRoutes(
     ctx.body = { code: 200, data };
   });
 
+  router.post('/api/admin/contents/:type', adminAuth, async (ctx) => {
+    const type = String((ctx.params as { type?: string }).type || '').trim();
+    if (!contentTypes.has(type)) {
+      ctx.status = 404;
+      ctx.body = { statusCode: 404, message: '内容类型不存在' };
+      return;
+    }
+    const dto = await parseDto(AdminCreateContentDto, jsonBody(ctx));
+    ctx.body = {
+      code: 200,
+      data: await adminService.createContent(
+        type as 'errands' | 'posts' | 'items' | 'tasks',
+        dto,
+        ctx.state.admin,
+      ),
+    };
+  });
+
+  router.patch('/api/admin/contents/:type/:id', adminAuth, async (ctx) => {
+    const type = String((ctx.params as { type?: string }).type || '').trim();
+    const id = String((ctx.params as { id?: string }).id || '').trim();
+    if (!contentTypes.has(type)) {
+      ctx.status = 404;
+      ctx.body = { statusCode: 404, message: '内容类型不存在' };
+      return;
+    }
+    const dto = await parseDto(AdminUpdateContentDto, jsonBody(ctx));
+    ctx.body = {
+      code: 200,
+      data: await adminService.updateContentFields(
+        type as 'errands' | 'posts' | 'items' | 'tasks',
+        id,
+        dto,
+        ctx.state.admin,
+      ),
+    };
+  });
+
+  router.delete('/api/admin/contents/:type/:id', adminAuth, async (ctx) => {
+    const type = String((ctx.params as { type?: string }).type || '').trim();
+    const id = String((ctx.params as { id?: string }).id || '').trim();
+    if (!contentTypes.has(type)) {
+      ctx.status = 404;
+      ctx.body = { statusCode: 404, message: '内容类型不存在' };
+      return;
+    }
+    ctx.body = {
+      code: 200,
+      data: await adminService.deleteContent(
+        type as 'errands' | 'posts' | 'items' | 'tasks',
+        id,
+        ctx.state.admin,
+      ),
+    };
+  });
+
   router.patch('/api/admin/contents/:type/:id/state', adminAuth, async (ctx) => {
     const type = String((ctx.params as { type?: string }).type || '').trim();
     const id = String((ctx.params as { id?: string }).id || '').trim();
@@ -156,10 +323,15 @@ export function registerAdminRoutes(
     const dto = await parseDto(UpdateContentStateDto, jsonBody(ctx));
     ctx.body = {
       code: 200,
-      data: await adminService.updateContentState(type as 'errands' | 'posts' | 'items' | 'tasks', id, {
-        visibility: dto.visibility,
-        pinned: dto.pinned,
-      }),
+      data: await adminService.updateContentState(
+        type as 'errands' | 'posts' | 'items' | 'tasks',
+        id,
+        {
+          visibility: dto.visibility,
+          pinned: dto.pinned,
+        },
+        ctx.state.admin,
+      ),
     };
   });
 
@@ -173,10 +345,15 @@ export function registerAdminRoutes(
     const dto = await parseDto(BatchUpdateContentStateDto, jsonBody(ctx));
     ctx.body = {
       code: 200,
-      data: await adminService.batchUpdateContentState(type as 'errands' | 'posts' | 'items' | 'tasks', dto.ids, {
-        visibility: dto.visibility,
-        pinned: dto.pinned,
-      }),
+      data: await adminService.batchUpdateContentState(
+        type as 'errands' | 'posts' | 'items' | 'tasks',
+        dto.ids,
+        {
+          visibility: dto.visibility,
+          pinned: dto.pinned,
+        },
+        ctx.state.admin,
+      ),
     };
   });
 

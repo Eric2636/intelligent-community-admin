@@ -34,12 +34,31 @@ model AdminUser {
   role         AdminRole @default(ADMIN)
   type         AdminType @default(OFFICIAL)
   orgName      String?
+  /// 绑定的小程序 User.id；普通管理员仅能增删改以该身份发布的内容
+  boundUserId  String?
   enabled      Boolean   @default(true)
   lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @default(now()) @updatedAt
 
   @@index([role, enabled])
+  @@index([boundUserId])
+}
+
+/// 后台系统日志（仅超级管理员可查看）
+model AdminSystemLog {
+  id            String   @id @default(cuid())
+  adminId       String
+  adminUsername String
+  ip            String
+  action        String
+  detail        Json?
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([adminId, createdAt])
+  @@index([action, createdAt])
+  @@map("admin_system_logs")
 }
 
 model Task {
@@ -55,10 +74,15 @@ model Task {
   pinned        Boolean    @default(false)
   publisherId   String
   publisherName String?
+  /// 后台发布标签：所属单位或“网站管理员”
+  adminLabel    String?
+  /// 标记内容由哪个后台管理员创建（用于审计/展示）
+  createdByAdminId String?
   takerId       String?
   takerName     String?
   proofText     String?    @db.Text
   proofImages   Json?
+  deletedAt     DateTime?
   createdAt     DateTime   @default(now())
   claimedAt     DateTime?
   completedAt   DateTime?
@@ -68,6 +92,8 @@ model Task {
   @@index([visibility, pinned, createdAt])
   @@index([publisherId, createdAt])
   @@index([takerId, claimedAt])
+  @@index([deletedAt])
+  @@index([createdByAdminId])
 }
 
 model Errand {
@@ -81,12 +107,17 @@ model Errand {
   visibility   ContentVisibility @default(ONLINE)
   authorId     String
   authorName   String?
+  /// 后台发布标签：所属单位或“网站管理员”
+  adminLabel   String?
+  /// 标记内容由哪个后台管理员创建（用于审计/展示）
+  createdByAdminId String?
   claimerId    String?
   claimerName  String?
   pinned       Boolean      @default(false)
   viewCount    Int          @default(0)
   likeCount    Int          @default(0)
   replyCount   Int          @default(0)
+  deletedAt    DateTime?
   createdAt    DateTime     @default(now())
   claimedAt    DateTime?
   completedAt  DateTime?
@@ -100,6 +131,8 @@ model Errand {
   @@index([authorId, createdAt])
   @@index([claimerId, claimedAt])
   @@index([pinned, createdAt])
+  @@index([deletedAt])
+  @@index([createdByAdminId])
 }
 
 model ErrandReply {
@@ -149,11 +182,16 @@ model ForumPost {
   authorId     String
   authorName   String?
   authorAvatar String?
+  /// 后台发布标签：所属单位或“网站管理员”
+  adminLabel   String?
+  /// 标记内容由哪个后台管理员创建（用于审计/展示）
+  createdByAdminId String?
   visibility   ContentVisibility @default(ONLINE)
   pinned       Boolean  @default(false)
   viewCount    Int      @default(0)
   likeCount    Int      @default(0)
   replyCount   Int      @default(0)
+  deletedAt    DateTime?
   createdAt    DateTime @default(now())
 
   replies   ForumReply[]
@@ -163,6 +201,8 @@ model ForumPost {
   @@index([pinned, createdAt])
   @@index([visibility, pinned, createdAt])
   @@index([authorId, createdAt])
+  @@index([deletedAt])
+  @@index([createdByAdminId])
   @@map("forum_posts")
 }
 
@@ -293,8 +333,13 @@ model MallItem {
   /// 兼容旧字段（历史数据可能仍写入该字段）
   images       Json?
   publisherId  String
+  /// 后台发布标签：所属单位或“网站管理员”
+  adminLabel   String?
+  /// 标记内容由哪个后台管理员创建（用于审计/展示）
+  createdByAdminId String?
   visibility   ContentVisibility @default(ONLINE)
   pinned       Boolean  @default(false)
+  deletedAt    DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @default(now()) @updatedAt
 
@@ -305,6 +350,8 @@ model MallItem {
   @@index([categoryId, createdAt])
   @@index([visibility, pinned, createdAt])
   @@index([publisherId, createdAt])
+  @@index([deletedAt])
+  @@index([createdByAdminId])
   @@map("mall_items")
 }
 

@@ -1,4 +1,5 @@
 import { HttpError } from '../../http-error';
+import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { prisma } from '../../lib/prisma';
 import { serializeMallOrder } from './mall.serialize';
 
@@ -16,7 +17,9 @@ export class MallOrderService {
       throw new HttpError(400, '不能购买自己发布的商品');
     }
 
-    const item = await prisma.mallItem.findFirst({ where: { id: params.itemId, visibility: 'ONLINE' } });
+    const item = await prisma.mallItem.findFirst({
+      where: { id: params.itemId, visibility: 'ONLINE', ...contentNotDeleted },
+    });
     if (!item) throw new HttpError(404, '商品不存在');
     if (item.publisherId !== params.sellerId) {
       throw new HttpError(400, '卖家信息与商品不一致');

@@ -1,5 +1,6 @@
 import type { ForumReply, Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
+import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import {
@@ -46,7 +47,7 @@ export class ForumService {
     const k = keyword && keyword.trim() ? keyword.trim() : '';
     const textFilter: Prisma.ForumPostWhereInput = k ? { title: { contains: k } } : {};
 
-    const visibleWhere: Prisma.ForumPostWhereInput = { visibility: 'ONLINE', ...textFilter };
+    const visibleWhere: Prisma.ForumPostWhereInput = { visibility: 'ONLINE', ...contentNotDeleted, ...textFilter };
     const pinnedWhere: Prisma.ForumPostWhereInput = { pinned: true, ...visibleWhere };
     const listWhere: Prisma.ForumPostWhereInput = { pinned: false, ...visibleWhere };
 
@@ -101,7 +102,7 @@ export class ForumService {
     if (!id) throw new HttpError(400, 'postId 不能为空');
 
     const row = await prisma.$transaction(async (tx) => {
-      const exists = await tx.forumPost.findFirst({ where: { id, visibility: 'ONLINE' } });
+      const exists = await tx.forumPost.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
       if (!exists) return null;
       await tx.forumPost.update({ where: { id }, data: { viewCount: { increment: 1 } } });
       return tx.forumPost.findUnique({ where: { id } });
@@ -138,11 +139,11 @@ export class ForumService {
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
 
-    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE' } });
+    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
     if (!post) throw new HttpError(404, '帖子不存在');
     if (post.authorId !== params.userId) throw new HttpError(403, '仅能删除自己的帖子');
 
-    await prisma.forumPost.delete({ where: { id } });
+    await prisma.forumPost.update({ where: { id }, data: { deletedAt: new Date() } });
     await invalidateForumPostRepliesCache(id);
     return {};
   }
@@ -215,7 +216,7 @@ export class ForumService {
       throw new HttpError(400, '请输入回复或添加图片/视频');
     }
 
-    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE' } });
+    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
     if (!post) throw new HttpError(404, '帖子不存在');
 
     const parentReplyId: string | null = params.parentReplyId?.trim() || null;
@@ -415,7 +416,10 @@ export class ForumService {
   async like(params: { userId: string; postId: string }) {
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
-    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    const post = await prisma.forumPost.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
     if (!post) throw new HttpError(404, '帖子不存在');
     try {
       await prisma.forumPostLike.create({ data: { postId: id, userId: params.userId } });
@@ -430,7 +434,10 @@ export class ForumService {
   async unlike(params: { userId: string; postId: string }) {
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
-    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    const post = await prisma.forumPost.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
     if (!post) throw new HttpError(404, '帖子不存在');
     try {
       await prisma.forumPostLike.delete({ where: { postId_userId: { postId: id, userId: params.userId } } });
@@ -448,7 +455,10 @@ export class ForumService {
   async favorite(params: { userId: string; postId: string }) {
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
-    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    const post = await prisma.forumPost.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
     if (!post) throw new HttpError(404, '帖子不存在');
     try {
       await prisma.forumPostFavorite.create({ data: { postId: id, userId: params.userId } });
@@ -461,7 +471,10 @@ export class ForumService {
   async unfavorite(params: { userId: string; postId: string }) {
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
-    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    const post = await prisma.forumPost.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
     if (!post) throw new HttpError(404, '帖子不存在');
     try {
       await prisma.forumPostFavorite.delete({ where: { postId_userId: { postId: id, userId: params.userId } } });
@@ -473,7 +486,7 @@ export class ForumService {
 
   async getMyPosts(params: { userId: string }) {
     const rows = await prisma.forumPost.findMany({
-      where: { authorId: params.userId, visibility: 'ONLINE' },
+      where: { authorId: params.userId, visibility: 'ONLINE', ...contentNotDeleted },
       orderBy: { createdAt: 'desc' },
     });
     const ids = rows.map((r) => r.id);
@@ -615,7 +628,9 @@ export class ForumService {
     if (favs.length === 0) return [];
 
     const ids = favs.map((f) => f.postId);
-    const posts = await prisma.forumPost.findMany({ where: { id: { in: ids }, visibility: 'ONLINE' } });
+    const posts = await prisma.forumPost.findMany({
+      where: { id: { in: ids }, visibility: 'ONLINE', ...contentNotDeleted },
+    });
     const map = new Map(posts.map((p) => [p.id, p]));
 
     const liked = await prisma.forumPostLike.findMany({
@@ -639,6 +654,7 @@ export class ForumService {
       videos: unknown;
       authorId: string;
       authorName: string | null;
+      adminLabel?: string | null;
       pinned?: boolean;
       viewCount?: number;
       likeCount: number;
@@ -661,6 +677,7 @@ export class ForumService {
       pinned: Boolean(p.pinned),
       authorId: p.authorId,
       authorName: p.authorName ?? '',
+      adminLabel: p.adminLabel ?? '',
       viewCount: p.viewCount ?? 0,
       likeCount: p.likeCount ?? 0,
       replyCount: p.replyCount ?? 0,

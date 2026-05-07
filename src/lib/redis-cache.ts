@@ -46,6 +46,11 @@ function getRedis(): Redis | null {
   return client;
 }
 
+/** 仅供少数场景（如登录安全）直接使用 Redis。 */
+export function getRedisClient(): Redis | null {
+  return getRedis();
+}
+
 export async function cacheAsideJson<T>(key: string, ttlSec: number, loader: () => Promise<T>): Promise<T> {
   const r = getRedis();
   if (!r) return loader();

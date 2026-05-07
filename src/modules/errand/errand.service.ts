@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
+import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { prisma } from '../../lib/prisma';
 import {
   cacheAsideJson,
@@ -53,7 +54,7 @@ export class ErrandService {
       ? { OR: [{ title: { contains: k } }, { content: { contains: k } }] }
       : {};
 
-    const visibleWhere: Prisma.ErrandWhereInput = { visibility: 'ONLINE', ...textFilter };
+    const visibleWhere: Prisma.ErrandWhereInput = { visibility: 'ONLINE', ...contentNotDeleted, ...textFilter };
     const pinnedWhere: Prisma.ErrandWhereInput = { pinned: true, ...visibleWhere };
     const listWhere: Prisma.ErrandWhereInput = { pinned: false, ...visibleWhere };
 
@@ -109,7 +110,7 @@ export class ErrandService {
     if (!id) throw new HttpError(400, 'errandId 不能为空');
 
     const row = await prisma.$transaction(async (tx) => {
-      const exists = await tx.errand.findFirst({ where: { id, visibility: 'ONLINE' } });
+      const exists = await tx.errand.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
       if (!exists) return null;
       await tx.errand.update({ where: { id }, data: { viewCount: { increment: 1 } } });
       return tx.errand.findUnique({ where: { id } });
@@ -183,7 +184,7 @@ export class ErrandService {
     if (!id) throw new HttpError(400, 'errandId 不能为空');
 
     return prisma.$transaction(async (tx) => {
-      const row = await tx.errand.findFirst({ where: { id, visibility: 'ONLINE' } });
+      const row = await tx.errand.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '跑腿不存在');
       if (row.authorId === params.userId) throw new HttpError(400, '不能领取自己发布的跑腿');
       if (row.status !== 'PENDING_TAKE') throw new HttpError(400, '该跑腿已被领取或已结束');
@@ -208,7 +209,7 @@ export class ErrandService {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
 
-    const row = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' } });
+    const row = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
     if (!row) throw new HttpError(404, '跑腿不存在');
     if (row.authorId !== params.userId) throw new HttpError(403, '仅发布者可确认完成');
     if (row.status !== 'IN_PROGRESS') throw new HttpError(400, '该跑腿当前不可确认完成');
@@ -226,7 +227,7 @@ export class ErrandService {
     if (!id) throw new HttpError(400, 'errandId 不能为空');
     if (!content) throw new HttpError(400, '请输入回复');
 
-    const errand = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' } });
+    const errand = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
     if (!errand) throw new HttpError(404, '跑腿不存在');
 
     const authorName = await this.getUserDisplayName(params.userId);
@@ -248,7 +249,10 @@ export class ErrandService {
   async like(params: { userId: string; errandId: string }) {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
-    const exists = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    const exists = await prisma.errand.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
     if (!exists) throw new HttpError(404, '跑腿不存在');
     try {
       await prisma.errandLike.create({ data: { errandId: id, userId: params.userId } });
@@ -264,7 +268,10 @@ export class ErrandService {
   async unlike(params: { userId: string; errandId: string }) {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
-    const exists = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    const exists = await prisma.errand.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
     if (!exists) throw new HttpError(404, '跑腿不存在');
     try {
       await prisma.errandLike.delete({ where: { errandId_userId: { errandId: id, userId: params.userId } } });
@@ -282,7 +289,10 @@ export class ErrandService {
   async favorite(params: { userId: string; errandId: string }) {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
-    const exists = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    const exists = await prisma.errand.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
     if (!exists) throw new HttpError(404, '跑腿不存在');
     try {
       await prisma.errandFavorite.create({ data: { errandId: id, userId: params.userId } });
@@ -295,7 +305,10 @@ export class ErrandService {
   async unfavorite(params: { userId: string; errandId: string }) {
     const id = String(params.errandId || '').trim();
     if (!id) throw new HttpError(400, 'errandId 不能为空');
-    const exists = await prisma.errand.findFirst({ where: { id, visibility: 'ONLINE' }, select: { id: true } });
+    const exists = await prisma.errand.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
     if (!exists) throw new HttpError(404, '跑腿不存在');
     try {
       await prisma.errandFavorite.delete({ where: { errandId_userId: { errandId: id, userId: params.userId } } });
@@ -310,7 +323,7 @@ export class ErrandService {
     const where =
       role === 'claimed' ? { claimerId: params.userId } : { authorId: params.userId };
     const rows = await prisma.errand.findMany({
-      where: { ...where, visibility: 'ONLINE' },
+      where: { ...where, visibility: 'ONLINE', ...contentNotDeleted },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -339,6 +352,7 @@ export class ErrandService {
       status: string;
       authorId: string;
       authorName: string | null;
+      adminLabel?: string | null;
       claimerId: string | null;
       claimerName: string | null;
       pinned?: boolean;
@@ -369,6 +383,7 @@ export class ErrandService {
       statusText: statusTextFrom(status),
       authorId: e.authorId,
       authorName: e.authorName ?? '',
+      adminLabel: e.adminLabel ?? '',
       claimerId: e.claimerId ?? '',
       claimerName: e.claimerName ?? '',
       viewCount: e.viewCount ?? 0,

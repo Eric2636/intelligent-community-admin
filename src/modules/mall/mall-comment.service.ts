@@ -1,4 +1,5 @@
 import { HttpError } from '../../http-error';
+import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { prisma } from '../../lib/prisma';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
 import type { Prisma } from '@prisma/client';
@@ -126,7 +127,7 @@ export class MallCommentService {
     }
 
     const exists = await prisma.mallItem.findFirst({
-      where: { id: itemId, visibility: 'ONLINE' },
+      where: { id: itemId, visibility: 'ONLINE', ...contentNotDeleted },
       select: { id: true },
     });
     if (!exists) throw new HttpError(404, '商品不存在');

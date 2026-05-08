@@ -4,8 +4,11 @@ import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { prisma } from '../../lib/prisma';
 import {
   cacheAsideJson,
+  errandListCacheKey,
+  ERRAND_LIST_TTL_SEC,
   errandRepliesDataCacheKey,
   ERRAND_REPLIES_TTL_SEC,
+  invalidateErrandListCache,
   invalidateErrandRepliesCache,
 } from '../../lib/redis-cache';
 
@@ -39,6 +42,18 @@ export class ErrandService {
     return row?.name ?? '邻居';
   }
 
+  private reviveErrandRows<T extends { createdAt: Date; claimedAt: Date | null; completedAt: Date | null }>(
+    rows: T[],
+  ): T[] {
+    return rows.map((r) => ({
+      ...r,
+      createdAt: r.createdAt instanceof Date ? r.createdAt : new Date(r.createdAt as unknown as string),
+      claimedAt: !r.claimedAt || r.claimedAt instanceof Date ? r.claimedAt : new Date(r.claimedAt as unknown as string),
+      completedAt:
+        !r.completedAt || r.completedAt instanceof Date ? r.completedAt : new Date(r.completedAt as unknown as string),
+    }));
+  }
+
   async listErrands(params: {
     userId: string;
     page: number;
@@ -63,19 +78,27 @@ export class ErrandService {
         ? [{ replyCount: 'desc' as const }, { likeCount: 'desc' as const }, { createdAt: 'desc' as const }]
         : [{ createdAt: 'desc' as const }];
 
-    const [pinnedRows, total, listRows] = await Promise.all([
-      prisma.errand.findMany({
-        where: pinnedWhere,
-        orderBy: [{ createdAt: 'desc' }],
-      }),
-      prisma.errand.count({ where: listWhere }),
-      prisma.errand.findMany({
-        where: listWhere,
-        orderBy,
-        skip,
-        take: pageSize,
-      }),
-    ]);
+    const cacheKey = await errandListCacheKey(page, pageSize, k, params.orderBy || 'time');
+    const cached = await cacheAsideJson(cacheKey, ERRAND_LIST_TTL_SEC, async () => {
+      const [pinnedRows, total, listRows] = await Promise.all([
+        prisma.errand.findMany({
+          where: pinnedWhere,
+          orderBy: [{ createdAt: 'desc' }],
+        }),
+        prisma.errand.count({ where: listWhere }),
+        prisma.errand.findMany({
+          where: listWhere,
+          orderBy,
+          skip,
+          take: pageSize,
+        }),
+      ]);
+      return { pinnedRows, total, listRows };
+    });
+
+    const pinnedRows = this.reviveErrandRows(cached.pinnedRows);
+    const listRows = this.reviveErrandRows(cached.listRows);
+    const total = cached.total;
 
     const uniqueIds = [...new Set([...pinnedRows, ...listRows].map((r) => r.id))];
     const [liked, favorited] =
@@ -176,6 +199,7 @@ export class ErrandService {
         videos: [],
       },
     });
+    await invalidateErrandListCache();
     return this.mapErrand(row, params.userId, false, false);
   }
 
@@ -202,6 +226,9 @@ export class ErrandService {
         },
       });
       return this.mapErrand(updated, params.userId, false, false);
+    }).then(async (mapped) => {
+      await invalidateErrandListCache();
+      return mapped;
     });
   }
 
@@ -218,6 +245,7 @@ export class ErrandService {
       where: { id },
       data: { status: 'COMPLETED', completedAt: new Date() },
     });
+    await invalidateErrandListCache();
     return this.mapErrand(updated, params.userId, false, false);
   }
 
@@ -235,7 +263,7 @@ export class ErrandService {
       data: { errandId: id, authorId: params.userId, authorName, content },
     });
     await prisma.errand.update({ where: { id }, data: { replyCount: { increment: 1 } } });
-    await invalidateErrandRepliesCache(id);
+    await Promise.all([invalidateErrandListCache(), invalidateErrandRepliesCache(id)]);
     return {
       _id: row.id,
       id: row.id,
@@ -257,10 +285,12 @@ export class ErrandService {
     try {
       await prisma.errandLike.create({ data: { errandId: id, userId: params.userId } });
       const updated = await prisma.errand.update({ where: { id }, data: { likeCount: { increment: 1 } } });
+      await invalidateErrandListCache();
       return { likeCount: updated.likeCount };
     } catch {
       // 已点赞：直接返回当前计数
       const row = await prisma.errand.findUnique({ where: { id }, select: { likeCount: true } });
+      await invalidateErrandListCache();
       return { likeCount: row?.likeCount ?? 0 };
     }
   }
@@ -279,9 +309,11 @@ export class ErrandService {
         where: { id },
         data: { likeCount: { decrement: 1 } },
       });
+      await invalidateErrandListCache();
       return { likeCount: Math.max(0, updated.likeCount) };
     } catch {
       const row = await prisma.errand.findUnique({ where: { id }, select: { likeCount: true } });
+      await invalidateErrandListCache();
       return { likeCount: row?.likeCount ?? 0 };
     }
   }
@@ -401,4 +433,3 @@ export class ErrandService {
     };
   }
 }
-

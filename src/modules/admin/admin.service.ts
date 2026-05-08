@@ -7,7 +7,9 @@ import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import {
+  invalidateErrandListCache,
   invalidateErrandRepliesCache,
+  invalidateForumPostListCache,
   invalidateForumPostRepliesCache,
   invalidateMallItemDetailCache,
   invalidateMallItemsListCache,
@@ -635,7 +637,9 @@ export class AdminService {
       });
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
-      return prisma.errand.update({ where: { id }, data });
+      const updated = await prisma.errand.update({ where: { id }, data });
+      await invalidateErrandListCache();
+      return updated;
     }
     if (type === 'posts') {
       const row = await prisma.forumPost.findFirst({
@@ -644,7 +648,9 @@ export class AdminService {
       });
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
-      return prisma.forumPost.update({ where: { id }, data });
+      const updated = await prisma.forumPost.update({ where: { id }, data });
+      await invalidateForumPostListCache();
+      return updated;
     }
     if (type === 'items') {
       const row = await prisma.mallItem.findFirst({
@@ -836,10 +842,14 @@ export class AdminService {
     }
 
     if (type === 'errands') {
-      return prisma.errand.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      const result = await prisma.errand.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      await invalidateErrandListCache();
+      return result;
     }
     if (type === 'posts') {
-      return prisma.forumPost.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      const result = await prisma.forumPost.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      await invalidateForumPostListCache();
+      return result;
     }
     if (type === 'items') {
       const result = await prisma.mallItem.updateMany({
@@ -1058,6 +1068,7 @@ export class AdminService {
           pinned: pin,
         },
       });
+      await invalidateErrandListCache();
       return {
         ...row,
         createdAt: row.createdAt.toISOString(),
@@ -1094,6 +1105,7 @@ export class AdminService {
           pinned: pin,
         },
       });
+      await invalidateForumPostListCache();
       return { ...row, createdAt: row.createdAt.toISOString() };
     }
 
@@ -1248,7 +1260,7 @@ export class AdminService {
         data.authorName = author?.name ?? '';
       }
       const row = await prisma.errand.update({ where: { id }, data });
-      await invalidateErrandRepliesCache(id);
+      await Promise.all([invalidateErrandListCache(), invalidateErrandRepliesCache(id)]);
       return {
         ...row,
         createdAt: row.createdAt.toISOString(),
@@ -1285,7 +1297,7 @@ export class AdminService {
         data.authorAvatar = author?.avatar ?? null;
       }
       const row = await prisma.forumPost.update({ where: { id }, data });
-      await invalidateForumPostRepliesCache(id);
+      await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
       return { ...row, createdAt: row.createdAt.toISOString() };
     }
 
@@ -1411,7 +1423,7 @@ export class AdminService {
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
       await prisma.errand.update({ where: { id }, data: { deletedAt: now } });
-      await invalidateErrandRepliesCache(id);
+      await Promise.all([invalidateErrandListCache(), invalidateErrandRepliesCache(id)]);
       return { id };
     }
 
@@ -1420,7 +1432,7 @@ export class AdminService {
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
       await prisma.forumPost.update({ where: { id }, data: { deletedAt: now } });
-      await invalidateForumPostRepliesCache(id);
+      await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
       return { id };
     }
 

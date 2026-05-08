@@ -6,7 +6,10 @@ import { prisma } from '../../lib/prisma';
 import {
   cacheAsideJson,
   FORUM_POST_REPLIES_TTL_SEC,
+  FORUM_POST_LIST_TTL_SEC,
+  forumPostListCacheKey,
   forumPostRepliesDataCacheKey,
+  invalidateForumPostListCache,
   invalidateForumPostRepliesCache,
 } from '../../lib/redis-cache';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
@@ -34,6 +37,13 @@ export class ForumService {
     }));
   }
 
+  private reviveForumPostRows<T extends { createdAt: Date }>(rows: T[]): T[] {
+    return rows.map((r) => ({
+      ...r,
+      createdAt: r.createdAt instanceof Date ? r.createdAt : new Date(r.createdAt as unknown as string),
+    }));
+  }
+
   async listPosts(params: {
     userId: string;
     page: number;
@@ -56,19 +66,27 @@ export class ForumService {
         ? [{ replyCount: 'desc' as const }, { createdAt: 'desc' as const }]
         : [{ createdAt: 'desc' as const }];
 
-    const [pinnedRows, total, listRows] = await Promise.all([
-      prisma.forumPost.findMany({
-        where: pinnedWhere,
-        orderBy: [{ createdAt: 'desc' }],
-      }),
-      prisma.forumPost.count({ where: listWhere }),
-      prisma.forumPost.findMany({
-        where: listWhere,
-        orderBy,
-        skip,
-        take: pageSize,
-      }),
-    ]);
+    const cacheKey = await forumPostListCacheKey(page, pageSize, k, params.orderBy || 'time');
+    const cached = await cacheAsideJson(cacheKey, FORUM_POST_LIST_TTL_SEC, async () => {
+      const [pinnedRows, total, listRows] = await Promise.all([
+        prisma.forumPost.findMany({
+          where: pinnedWhere,
+          orderBy: [{ createdAt: 'desc' }],
+        }),
+        prisma.forumPost.count({ where: listWhere }),
+        prisma.forumPost.findMany({
+          where: listWhere,
+          orderBy,
+          skip,
+          take: pageSize,
+        }),
+      ]);
+      return { pinnedRows, total, listRows };
+    });
+
+    const pinnedRows = this.reviveForumPostRows(cached.pinnedRows);
+    const listRows = this.reviveForumPostRows(cached.listRows);
+    const total = cached.total;
 
     const uniqueIds = [...new Set([...pinnedRows, ...listRows].map((r) => r.id))];
     const [liked, favorited] =
@@ -144,7 +162,7 @@ export class ForumService {
     if (post.authorId !== params.userId) throw new HttpError(403, '仅能删除自己的帖子');
 
     await prisma.forumPost.update({ where: { id }, data: { deletedAt: new Date() } });
-    await invalidateForumPostRepliesCache(id);
+    await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
     return {};
   }
 
@@ -196,6 +214,7 @@ export class ForumService {
         authorAvatar: authorAvatar || null,
       },
     });
+    await invalidateForumPostListCache();
     return this.mapPostDetail(row, params.userId, false, false);
   }
 
@@ -261,7 +280,7 @@ export class ForumService {
       return r;
     });
 
-    await invalidateForumPostRepliesCache(id);
+    await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
 
     return {
       _id: row.id,
@@ -424,9 +443,11 @@ export class ForumService {
     try {
       await prisma.forumPostLike.create({ data: { postId: id, userId: params.userId } });
       const updated = await prisma.forumPost.update({ where: { id }, data: { likeCount: { increment: 1 } } });
+      await invalidateForumPostListCache();
       return { liked: true, likeCount: updated.likeCount };
     } catch {
       const row = await prisma.forumPost.findUnique({ where: { id }, select: { likeCount: true } });
+      await invalidateForumPostListCache();
       return { liked: true, likeCount: row?.likeCount ?? 0 };
     }
   }
@@ -445,9 +466,11 @@ export class ForumService {
         where: { id },
         data: { likeCount: { decrement: 1 } },
       });
+      await invalidateForumPostListCache();
       return { liked: false, likeCount: Math.max(0, updated.likeCount) };
     } catch {
       const row = await prisma.forumPost.findUnique({ where: { id }, select: { likeCount: true } });
+      await invalidateForumPostListCache();
       return { liked: false, likeCount: row?.likeCount ?? 0 };
     }
   }

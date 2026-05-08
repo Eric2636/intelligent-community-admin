@@ -1,7 +1,10 @@
 import Router from '@koa/router';
+import jwt from 'jsonwebtoken';
 import { jwtAuth } from '../middleware/jwt-auth';
 import { WechatLoginDto } from '../modules/auth/auth.dto';
 import { AuthService } from '../modules/auth/auth.service';
+import { ReportMiniApiErrorLogDto } from '../modules/client-log/client-log.dto';
+import { ClientLogService } from '../modules/client-log/client-log.service';
 import {
   ClaimErrandDto,
   GetErrandsQueryDto,
@@ -40,6 +43,19 @@ const forumService = new ForumService();
 const uploadService = new UploadService();
 const settingsService = new SettingsService();
 const mallService = new MallService();
+const clientLogService = new ClientLogService();
+
+function tryGetUserFromBearer(auth?: string) {
+  if (!auth?.startsWith('Bearer ')) return {};
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return {};
+  try {
+    const payload = jwt.verify(auth.slice(7).trim(), secret) as { sub?: string; openid?: string };
+    return { userId: payload.sub, openid: payload.openid };
+  } catch {
+    return {};
+  }
+}
 
 export function createRouter() {
   const router = new Router();
@@ -48,7 +64,20 @@ export function createRouter() {
     ctx.body = { ok: true };
   });
 
-  registerAdminRoutes(router, adminService, settingsService);
+  registerAdminRoutes(router, adminService, settingsService, clientLogService);
+
+  router.post('/api/logs/mini-api-errors', async (ctx) => {
+    const dto = await parseDto(ReportMiniApiErrorLogDto, jsonBody(ctx));
+    const user = tryGetUserFromBearer(ctx.headers.authorization);
+    ctx.body = {
+      code: 200,
+      data: await clientLogService.reportMiniApiErrorLog({
+        ...user,
+        ip: ctx.ip,
+        dto,
+      }),
+    };
+  });
 
   router.post('/api/auth/wechat/login', async (ctx) => {
     const dto = await parseDto(WechatLoginDto, jsonBody(ctx));

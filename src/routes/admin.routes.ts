@@ -15,6 +15,8 @@ import {
   UpdateUserEnabledDto,
 } from '../modules/admin/admin.dto';
 import { AdminService } from '../modules/admin/admin.service';
+import { MiniApiErrorLogQueryDto } from '../modules/client-log/client-log.dto';
+import { ClientLogService } from '../modules/client-log/client-log.service';
 import { UpdateModuleTabEnabledDto } from '../modules/settings/settings.dto';
 import { SettingsService } from '../modules/settings/settings.service';
 import { CosCredentialsDto } from '../modules/upload/upload.dto';
@@ -36,6 +38,7 @@ export function registerAdminRoutes(
   router: Router,
   adminService: AdminService,
   settingsService: SettingsService,
+  clientLogService: ClientLogService,
 ) {
   router.get('/api/admin/auth/captcha', async (ctx) => {
     const data = await adminService.createLoginCaptcha();
@@ -75,6 +78,20 @@ export function registerAdminRoutes(
     ctx.body = {
       code: 200,
       data: await adminService.listSystemLogs({ ...pageOf(q), keyword: q.keyword, action: q.action }),
+    };
+  });
+
+  router.get('/api/admin/mini-api-error-logs', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const q = await parseDto(MiniApiErrorLogQueryDto, ctx.query);
+    ctx.body = {
+      code: 200,
+      data: await clientLogService.listMiniApiErrorLogs({
+        ...pageOf(q),
+        keyword: q.keyword,
+        method: q.method,
+        statusCode: q.statusCode,
+      }),
     };
   });
 

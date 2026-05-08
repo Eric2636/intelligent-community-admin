@@ -61,6 +61,34 @@ model AdminSystemLog {
   @@map("admin_system_logs")
 }
 
+/// 小程序接口错误日志（后台可查看，用于定位 C 端接口报错）
+model MiniProgramApiErrorLog {
+  id           String   @id @default(cuid())
+  userId       String?
+  openid       String?
+  ip           String?
+  method       String   @db.VarChar(16)
+  path         String   @db.VarChar(512)
+  url          String?  @db.Text
+  statusCode   Int?
+  errorMessage String   @db.Text
+  requestData  Json?
+  responseData Json?
+  stack        String?  @db.Text
+  platform     String?
+  appVersion   String?
+  sdkVersion   String?
+  system       String?
+  networkType  String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([method, createdAt])
+  @@index([statusCode, createdAt])
+  @@map("mini_program_api_error_logs")
+}
+
 model Task {
   id            String     @id @default(cuid())
   title         String

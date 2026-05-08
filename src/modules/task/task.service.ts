@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import { TaskStatus, type Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
 import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
@@ -168,6 +168,34 @@ export class TaskService {
 
       return rows.map((t) => this.mapTask(t));
     });
+  }
+
+  async getMyTasks(params: { userId: string; type?: string }) {
+    const type = String(params.type || 'published').trim();
+    const where: Prisma.TaskWhereInput = {
+      visibility: 'ONLINE',
+      ...contentNotDeleted,
+    };
+
+    if (type === 'taken') {
+      where.takerId = params.userId;
+    } else if (type === 'draft') {
+      where.publisherId = params.userId;
+      where.status = TaskStatus.DRAFT;
+    } else if (type === 'cancelled') {
+      where.publisherId = params.userId;
+      where.status = TaskStatus.CANCELLED;
+    } else {
+      where.publisherId = params.userId;
+      where.status = { notIn: [TaskStatus.DRAFT, TaskStatus.CANCELLED] };
+    }
+
+    const rows = await prisma.task.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return rows.map((t) => this.mapTask(t));
   }
 
   async revokePublish(params: { taskId: string; userId: string }) {

@@ -328,6 +328,13 @@ export function createRouter() {
     ctx.body = { code: 200, data };
   });
 
+  router.get('/api/tasks/my', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const type = String((ctx.query as { type?: string }).type || 'published').trim();
+    const data = await taskService.getMyTasks({ userId, type });
+    ctx.body = { code: 200, data };
+  });
+
   router.get('/api/tasks/:taskId', jwtAuth, async (ctx) => {
     const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
     const data = await taskService.getTaskDetail(taskId);

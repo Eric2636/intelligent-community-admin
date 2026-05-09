@@ -36,6 +36,7 @@ type AdminTokenPayload = {
   sub: string;
   username: string;
   role: 'ADMIN' | 'SUPERADMIN';
+  typ: 'access' | 'refresh';
 };
 
 function randomAdminPassword(length = 14): string {
@@ -185,7 +186,17 @@ export class AdminService {
     captchaCode?: string;
     ip?: string;
   }): Promise<
-    | { ok: true; data: { token: string; expiresIn: string; admin: ReturnType<typeof mapAdmin> } }
+    | {
+        ok: true;
+        data: {
+          token: string;
+          accessToken: string;
+          refreshToken: string;
+          expiresIn: string;
+          refreshExpiresIn: string;
+          admin: ReturnType<typeof mapAdmin>;
+        };
+      }
     | { ok: false; statusCode: number; body: any }
   > {
     const username = String(params.username || '').trim();
@@ -300,21 +311,54 @@ export class AdminService {
     const secret = adminJwtSecret();
     if (!secret) throw new HttpError(500, '后端未配置 ADMIN_JWT_SECRET 或 JWT_SECRET');
 
-    const expiresIn = process.env.ADMIN_JWT_EXPIRES_IN || process.env.JWT_EXPIRES_IN || '7d';
-    const payload: AdminTokenPayload = {
+    const expiresIn = process.env.ADMIN_JWT_EXPIRES_IN || '3h';
+    const refreshExpiresIn = process.env.ADMIN_REFRESH_JWT_EXPIRES_IN || '3h';
+    const basePayload = {
       sub: admin.id,
       username: admin.username,
       role: admin.role,
-    };
+    } satisfies Omit<AdminTokenPayload, 'typ'>;
     const signOpts: SignOptions = { expiresIn: expiresIn as SignOptions['expiresIn'] };
-    const token = jwt.sign(payload, secret, signOpts);
+    const refreshSignOpts: SignOptions = { expiresIn: refreshExpiresIn as SignOptions['expiresIn'] };
+    const token = jwt.sign({ ...basePayload, typ: 'access' }, secret, signOpts);
+    const refreshToken = jwt.sign({ ...basePayload, typ: 'refresh' }, secret, refreshSignOpts);
     const updated = await prisma.adminUser.update({
       where: { id: admin.id },
       data: { lastLoginAt: new Date() },
       select: adminSelect(),
     });
 
-    return { token, expiresIn, admin: mapAdmin(updated) };
+    return { token, accessToken: token, refreshToken, expiresIn, refreshExpiresIn, admin: mapAdmin(updated) };
+  }
+
+  async refreshToken(refreshTokenRaw: string) {
+    const refreshToken = String(refreshTokenRaw || '').trim();
+    if (!refreshToken) throw new HttpError(401, 'refreshToken 不能为空');
+
+    const secret = adminJwtSecret();
+    if (!secret) throw new HttpError(500, '后端未配置 ADMIN_JWT_SECRET 或 JWT_SECRET');
+
+    let payload: AdminTokenPayload;
+    try {
+      payload = jwt.verify(refreshToken, secret) as AdminTokenPayload;
+    } catch {
+      throw new HttpError(401, 'refreshToken 无效或已过期');
+    }
+    if (payload.typ !== 'refresh') throw new HttpError(401, 'refreshToken 类型错误');
+
+    const admin = await prisma.adminUser.findUnique({ where: { id: payload.sub }, select: adminSelect() });
+    if (!admin) throw new HttpError(404, '管理员不存在');
+    if (!admin.enabled) throw new HttpError(403, '管理员账号已停用');
+
+    const expiresIn = process.env.ADMIN_JWT_EXPIRES_IN || '3h';
+    const accessPayload: AdminTokenPayload = {
+      sub: admin.id,
+      username: admin.username,
+      role: admin.role,
+      typ: 'access',
+    };
+    const token = jwt.sign(accessPayload, secret, { expiresIn: expiresIn as SignOptions['expiresIn'] });
+    return { token, accessToken: token, expiresIn, admin: mapAdmin(admin) };
   }
 
   async getMe(adminId: string) {

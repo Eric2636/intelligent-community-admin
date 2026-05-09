@@ -63,6 +63,11 @@ export function registerAdminRoutes(
     ctx.body = { code: 200, data: res.data };
   });
 
+  router.post('/api/admin/auth/refresh', async (ctx) => {
+    const body = jsonBody(ctx) as { refreshToken?: string };
+    ctx.body = { code: 200, data: await adminService.refreshToken(body.refreshToken || '') };
+  });
+
   router.get('/api/admin/auth/me', adminAuth, async (ctx) => {
     ctx.body = { code: 200, data: await adminService.getMe(ctx.state.admin.adminId) };
   });

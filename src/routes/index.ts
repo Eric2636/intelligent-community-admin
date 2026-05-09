@@ -337,7 +337,7 @@ export function createRouter() {
     ctx.body = { code: 200, data: await errandService.unfavorite({ userId, errandId }) };
   });
 
-  router.get('/api/tasks', jwtAuth, async (ctx) => {
+  router.get('/api/tasks', async (ctx) => {
     const q = await parseDto(GetTasksQueryDto, ctx.query);
     const page = q.page ?? 1;
     const pageSize = q.pageSize ?? 50;
@@ -350,7 +350,7 @@ export function createRouter() {
   });
 
   // 兼容：部分客户端更喜欢用 POST 拉列表（body 传参）
-  router.post('/api/tasks/list', jwtAuth, async (ctx) => {
+  router.post('/api/tasks/list', async (ctx) => {
     const q = await parseDto(GetTasksQueryDto, jsonBody(ctx));
     const page = q.page ?? 1;
     const pageSize = q.pageSize ?? 50;
@@ -369,7 +369,7 @@ export function createRouter() {
     ctx.body = { code: 200, data };
   });
 
-  router.get('/api/tasks/:taskId', jwtAuth, async (ctx) => {
+  router.get('/api/tasks/:taskId', async (ctx) => {
     const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
     const data = await taskService.getTaskDetail(taskId);
     ctx.body = { code: 200, data };

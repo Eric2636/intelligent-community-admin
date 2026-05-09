@@ -262,7 +262,7 @@ export class ForumService {
       }
     }
 
-    const { name: authorName } = await this.getUserDisplayName(params.userId);
+    const { name: authorName, avatar: authorAvatar } = await this.getUserDisplayName(params.userId);
     const row = await prisma.$transaction(async (tx) => {
       const r = await tx.forumReply.create({
         data: {
@@ -290,6 +290,7 @@ export class ForumService {
       replyToAuthorName: row.replyToAuthorName,
       authorId: row.authorId,
       authorName: row.authorName ?? '',
+      authorAvatar,
       isAuthor: true,
       content: row.content,
       images: Array.isArray(row.images) ? row.images : row.images ?? [],
@@ -561,7 +562,8 @@ export class ForumService {
   ) {
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
-    const [likes, favs, userReactions, reactionAgg] = await Promise.all([
+    const authorIds = [...new Set(rows.map((r) => r.authorId).filter(Boolean))];
+    const [likes, favs, userReactions, reactionAgg, users] = await Promise.all([
       prisma.forumReplyLike.findMany({
         where: { userId, replyId: { in: ids } },
         select: { replyId: true },
@@ -579,10 +581,15 @@ export class ForumService {
         where: { replyId: { in: ids } },
         _count: { _all: true },
       }),
+      prisma.user.findMany({
+        where: { id: { in: authorIds } },
+        select: { id: true, avatar: true },
+      }),
     ]);
     const likedSet = new Set(likes.map((x) => x.replyId));
     const favSet = new Set(favs.map((x) => x.replyId));
     const myReactMap = new Map(userReactions.map((x) => [x.replyId, x.emoji]));
+    const userAvatarMap = new Map(users.map((x) => [x.id, x.avatar ?? '']));
     const countMap = new Map<string, Record<string, number>>();
     for (const g of reactionAgg) {
       if (!countMap.has(g.replyId)) countMap.set(g.replyId, {});
@@ -597,6 +604,7 @@ export class ForumService {
       replyToAuthorName: r.replyToAuthorName,
       authorId: r.authorId,
       authorName: r.authorName ?? '',
+      authorAvatar: userAvatarMap.get(r.authorId) ?? '',
       isAuthor: r.authorId === userId,
       content: r.content,
       images: Array.isArray(r.images) ? r.images : r.images ?? [],
@@ -677,6 +685,7 @@ export class ForumService {
       videos: unknown;
       authorId: string;
       authorName: string | null;
+      authorAvatar?: string | null;
       adminLabel?: string | null;
       pinned?: boolean;
       viewCount?: number;
@@ -700,6 +709,7 @@ export class ForumService {
       pinned: Boolean(p.pinned),
       authorId: p.authorId,
       authorName: p.authorName ?? '',
+      authorAvatar: p.authorAvatar ?? '',
       adminLabel: p.adminLabel ?? '',
       viewCount: p.viewCount ?? 0,
       likeCount: p.likeCount ?? 0,

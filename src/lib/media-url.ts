@@ -16,6 +16,16 @@ function pathnameForMediaCheck(url: string): string {
 }
 
 export function isImageMediaUrl(url: string): boolean {
+  const s = String(url || '').trim();
+  try {
+    const u = new URL(s);
+    const host = u.hostname.toLowerCase();
+    if ((u.protocol === 'https:' || u.protocol === 'http:') && (host === 'wx.qlogo.cn' || host.endsWith('.qlogo.cn'))) {
+      return true;
+    }
+  } catch {
+    /* fall back to suffix check */
+  }
   const p = pathnameForMediaCheck(url);
   return p.length > 0 && IMAGE_EXT_RE.test(p);
 }

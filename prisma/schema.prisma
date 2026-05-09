@@ -11,6 +11,7 @@ datasource db {
 model User {
   id             String    @id @default(cuid())
   openid         String    @unique
+  phoneNumber    String?   @unique
   name           String?
   avatar         String?
   gender         Int       @default(2)

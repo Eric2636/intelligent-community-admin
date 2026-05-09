@@ -13,6 +13,7 @@ export class UserService {
       select: {
         id: true,
         openid: true,
+        phoneNumber: true,
         name: true,
         avatar: true,
         gender: true,
@@ -55,6 +56,7 @@ export class UserService {
       select: {
         id: true,
         openid: true,
+        phoneNumber: true,
         name: true,
         avatar: true,
         gender: true,

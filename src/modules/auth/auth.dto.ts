@@ -19,3 +19,13 @@ export class WechatLoginDto {
   @Max(2)
   gender?: number;
 }
+
+export class WechatPhoneLoginDto {
+  @IsString()
+  @MinLength(1)
+  code!: string;
+
+  @IsString()
+  @MinLength(1)
+  phoneCode!: string;
+}

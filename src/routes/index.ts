@@ -1,7 +1,8 @@
 import Router from '@koa/router';
 import jwt from 'jsonwebtoken';
 import { jwtAuth } from '../middleware/jwt-auth';
-import { WechatLoginDto } from '../modules/auth/auth.dto';
+import { AdminService } from '../modules/admin/admin.service';
+import { WechatLoginDto, WechatPhoneLoginDto } from '../modules/auth/auth.dto';
 import { AuthService } from '../modules/auth/auth.service';
 import { ReportMiniApiErrorLogDto } from '../modules/client-log/client-log.dto';
 import { ClientLogService } from '../modules/client-log/client-log.service';
@@ -29,10 +30,9 @@ import { UploadService } from '../modules/upload/upload.service';
 import { UpdateMeDto } from '../modules/user/user.dto';
 import { UserService } from '../modules/user/user.service';
 import { parseDto } from '../validate';
-import { jsonBody } from './json-body';
 import { registerAdminRoutes } from './admin.routes';
+import { jsonBody } from './json-body';
 import { registerMallRoutes } from './mall.routes';
-import { AdminService } from '../modules/admin/admin.service';
 
 const adminService = new AdminService();
 const authService = new AuthService();
@@ -82,6 +82,11 @@ export function createRouter() {
   router.post('/api/auth/wechat/login', async (ctx) => {
     const dto = await parseDto(WechatLoginDto, jsonBody(ctx));
     ctx.body = await authService.wechatLogin(dto);
+  });
+
+  router.post('/api/auth/wechat/phone-login', async (ctx) => {
+    const dto = await parseDto(WechatPhoneLoginDto, jsonBody(ctx));
+    ctx.body = await authService.wechatPhoneLogin(dto);
   });
 
   router.get('/api/user/me', jwtAuth, async (ctx) => {

@@ -2,6 +2,7 @@ import axios from 'axios';
 import jwt, { type SignOptions } from 'jsonwebtoken';
 import { HttpError } from '../../http-error';
 import { prisma } from '../../lib/prisma';
+import type { WechatLoginDto } from './auth.dto';
 
 type JsCode2SessionResponse = {
   openid?: string;
@@ -12,7 +13,7 @@ type JsCode2SessionResponse = {
 };
 
 export class AuthService {
-  async wechatLogin(code: string) {
+  async wechatLogin(dto: WechatLoginDto) {
     const appid = process.env.WX_APPID;
     const secret = process.env.WX_APPSECRET;
     if (!appid || !secret) {
@@ -25,7 +26,7 @@ export class AuthService {
         params: {
           appid,
           secret,
-          js_code: code,
+          js_code: dto.code,
           grant_type: 'authorization_code',
         },
         timeout: 10_000,
@@ -40,13 +41,22 @@ export class AuthService {
       );
     }
 
+    const nickName = dto.nickName ? String(dto.nickName).trim() : '';
+    const avatarUrl = dto.avatarUrl ? String(dto.avatarUrl).trim() : '';
+    const profileData = {
+      ...(nickName ? { name: nickName } : {}),
+      ...(avatarUrl ? { avatar: avatarUrl } : {}),
+      ...(dto.gender !== undefined ? { gender: dto.gender } : {}),
+    };
+
     const user = await prisma.user.upsert({
       where: { openid: data.openid },
-      update: {},
+      update: profileData,
       create: {
         openid: data.openid,
-        name: `用户${Math.floor(Math.random() * 10000)}`,
-        gender: 2,
+        name: nickName || `用户${Math.floor(Math.random() * 10000)}`,
+        avatar: avatarUrl || undefined,
+        gender: dto.gender ?? 2,
       },
       select: {
         id: true,

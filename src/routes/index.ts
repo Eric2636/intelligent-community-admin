@@ -81,7 +81,7 @@ export function createRouter() {
 
   router.post('/api/auth/wechat/login', async (ctx) => {
     const dto = await parseDto(WechatLoginDto, jsonBody(ctx));
-    ctx.body = await authService.wechatLogin(dto.code);
+    ctx.body = await authService.wechatLogin(dto);
   });
 
   router.get('/api/user/me', jwtAuth, async (ctx) => {

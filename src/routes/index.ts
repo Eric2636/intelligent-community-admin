@@ -461,7 +461,7 @@ export function createRouter() {
     ctx.body = await uploadService.presignGetObjectUrl({ key: q.key });
   });
 
-  router.get('/api/app-settings/module-entry-tabs', jwtAuth, async (ctx) => {
+  router.get('/api/app-settings/module-entry-tabs', async (ctx) => {
     const data = await settingsService.getModuleEntryTabs();
     ctx.body = { code: 200, data };
   });

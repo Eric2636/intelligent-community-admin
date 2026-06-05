@@ -1,4 +1,5 @@
 import Router from '@koa/router';
+import { parseMultipartForm } from '../lib/multipart-form';
 import { adminAuth, requireSuperAdmin } from '../middleware/admin-auth';
 import {
   AdminContentQueryDto,
@@ -26,6 +27,7 @@ import { jsonBody } from './json-body';
 
 const contentTypes = new Set(['errands', 'posts', 'items', 'tasks']);
 const uploadService = new UploadService();
+const uploadMaxBytes = Number(process.env.UPLOAD_MAX_BYTES || String(100 * 1024 * 1024));
 
 function pageOf(q: { page?: number; pageSize?: number }) {
   return {
@@ -390,6 +392,29 @@ export function registerAdminRoutes(
         userId: ctx.state.admin.adminId,
         module: dto.module,
         type: dto.type,
+      }),
+    };
+  });
+
+  router.post('/api/admin/upload/media', adminAuth, async (ctx) => {
+    const form = await parseMultipartForm(ctx.req, ctx.headers['content-type'] || '', {
+      maxBytes: uploadMaxBytes,
+    });
+    const file = form.files.find((x) => x.fieldName === 'file') || form.files[0];
+    if (!file) {
+      ctx.status = 400;
+      ctx.body = { statusCode: 400, message: '缺少上传文件' };
+      return;
+    }
+    ctx.body = {
+      code: 200,
+      data: await uploadService.uploadMedia({
+        userId: ctx.state.admin.adminId,
+        module: form.fields.module,
+        type: form.fields.type,
+        filename: file.filename,
+        contentType: file.contentType,
+        buffer: file.buffer,
       }),
     };
   });

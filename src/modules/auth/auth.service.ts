@@ -42,6 +42,17 @@ function maskCode(code: string) {
   return { len: v.length, head: v.slice(0, 4), tail: v.slice(-4) };
 }
 
+type PhoneBindingUser = { id: string; openid: string } | null;
+type PhoneLoginBindingAction = 'upsert-current-openid' | 'migrate-bound-user';
+
+export function resolvePhoneLoginBindingAction(
+  bound: PhoneBindingUser,
+  currentOpenid: string,
+): PhoneLoginBindingAction {
+  if (bound && bound.openid !== currentOpenid) return 'migrate-bound-user';
+  return 'upsert-current-openid';
+}
+
 export class AuthService {
   private async code2Session(code: string): Promise<WechatSession> {
     const appid = process.env.WX_APPID;
@@ -196,37 +207,42 @@ export class AuthService {
       where: { phoneNumber },
       select: { id: true, openid: true },
     });
-    if (bound && bound.openid !== session.openid) {
-      throw new HttpError(409, '该手机号已绑定其他微信账号');
-    }
+    const userSelect = {
+      id: true,
+      openid: true,
+      phoneNumber: true,
+      name: true,
+      avatar: true,
+      gender: true,
+      birth: true,
+      address: true,
+      photos: true,
+      brief: true,
+      enabled: true,
+      disabledAt: true,
+      disabledReason: true,
+      createdAt: true,
+      updatedAt: true,
+    } as const;
 
-    const user = await prisma.user.upsert({
-      where: { openid: session.openid! },
-      update: { phoneNumber },
-      create: {
-        openid: session.openid!,
-        phoneNumber,
-        name: `用户${phoneNumber.slice(-4)}`,
-        gender: 2,
-      },
-      select: {
-        id: true,
-        openid: true,
-        phoneNumber: true,
-        name: true,
-        avatar: true,
-        gender: true,
-        birth: true,
-        address: true,
-        photos: true,
-        brief: true,
-        enabled: true,
-        disabledAt: true,
-        disabledReason: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    const user =
+      resolvePhoneLoginBindingAction(bound, session.openid) === 'migrate-bound-user'
+        ? await prisma.user.update({
+            where: { id: bound!.id },
+            data: { openid: session.openid },
+            select: userSelect,
+          })
+        : await prisma.user.upsert({
+            where: { openid: session.openid! },
+            update: { phoneNumber },
+            create: {
+              openid: session.openid!,
+              phoneNumber,
+              name: `用户${phoneNumber.slice(-4)}`,
+              gender: 2,
+            },
+            select: userSelect,
+          });
 
     const { token, expiresIn } = this.signToken(user);
     return {

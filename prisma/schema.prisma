@@ -215,11 +215,14 @@ model ForumPost {
   adminLabel   String?
   /// 标记内容由哪个后台管理员创建（用于审计/展示）
   createdByAdminId String?
+  postType     ForumPostType @default(NORMAL)
+  validUntil   DateTime?
   visibility   ContentVisibility @default(ONLINE)
   pinned       Boolean  @default(false)
   viewCount    Int      @default(0)
   likeCount    Int      @default(0)
   replyCount   Int      @default(0)
+  shareCount   Int      @default(0)
   deletedAt    DateTime?
   createdAt    DateTime @default(now())
 
@@ -229,6 +232,7 @@ model ForumPost {
 
   @@index([pinned, createdAt])
   @@index([visibility, pinned, createdAt])
+  @@index([postType, visibility, validUntil, createdAt])
   @@index([authorId, createdAt])
   @@index([deletedAt])
   @@index([createdByAdminId])
@@ -353,6 +357,10 @@ model MallItem {
   unit         String   @default("元")
   desc         String   @db.Text
   contact      String?
+  locationName String?
+  locationAddress String? @db.Text
+  latitude     Float?
+  longitude    Float?
   /// 主图（用于列表封面 + 详情轮播），最多 6 张（后端校验）
   mainImages   Json?
   /// 副图（用于详情轮播），与主图合计最多 6 张（后端校验）
@@ -469,6 +477,11 @@ enum AdminType {
 enum ContentVisibility {
   ONLINE
   OFFLINE
+}
+
+enum ForumPostType {
+  NORMAL
+  ANNOUNCEMENT
 }
 
 enum TaskStatus {

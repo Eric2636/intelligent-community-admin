@@ -59,6 +59,9 @@ export class UploadService {
     const typeSeg = params.type ? `/${params.type}` : '';
     const allowPrefix = `${envPrefix}/${params.module}${typeSeg}/${params.userId}/*`;
 
+    const objectResource = `qcs::cos:${region}:uid/${appId}:${bucket}/${allowPrefix}`;
+    const bucketResource = `qcs::cos:${region}:uid/${appId}:${bucket}/*`;
+
     const policy = {
       version: '2.0',
       statement: [
@@ -71,14 +74,25 @@ export class UploadService {
             // 秒传：客户端 headObject 探测对象是否已存在，与 GetObject 同资源鉴权
             'name/cos:GetObject',
             'name/cos:InitiateMultipartUpload',
-            'name/cos:ListMultipartUploads',
             'name/cos:ListParts',
             'name/cos:UploadPart',
             'name/cos:CompleteMultipartUpload',
             'name/cos:AbortMultipartUpload',
           ],
           effect: 'allow',
-          resource: [`qcs::cos:${region}:uid/${appId}:${bucket}/${allowPrefix}`],
+          resource: [objectResource],
+        },
+        {
+          // COS SDK 会先请求 /?uploads&prefix=... 列出未完成分块上传。
+          // 这个请求按 bucket 级资源鉴权，不能只给对象前缀资源，否则会 403。
+          action: ['name/cos:ListMultipartUploads'],
+          effect: 'allow',
+          resource: [bucketResource],
+          condition: {
+            string_like: {
+              'cos:prefix': allowPrefix,
+            },
+          },
         },
       ],
     };
@@ -113,7 +127,7 @@ export class UploadService {
 
   private assertUploadFile(params: { filename: string; contentType: string; buffer: Buffer; type: 'img' | 'vid' }) {
     if (!params.buffer.length) throw new HttpError(400, '上传文件为空');
-    const ext = extFromFilename(params.filename) || extFromContentType(params.contentType);
+    const ext = extFromFilename(params.filename) || extFromContentType(params.contentType) || (params.type === 'vid' ? 'mp4' : 'jpg');
     const allowed = params.type === 'vid' ? VIDEO_EXTS : IMAGE_EXTS;
     if (!ext || !allowed.has(ext)) {
       throw new HttpError(400, params.type === 'vid' ? '仅支持上传常见视频格式' : '仅支持上传常见图片格式');
@@ -126,6 +140,7 @@ export class UploadService {
     module: string;
     type?: string;
     filename: string;
+    filenameHint?: string;
     contentType: string;
     buffer: Buffer;
   }) {
@@ -134,7 +149,8 @@ export class UploadService {
     const bucket = this.mustGet('COS_BUCKET');
     const region = this.mustGet('COS_REGION');
     const scope = this.assertUploadScope(params);
-    const ext = this.assertUploadFile({ ...params, type: scope.type });
+    const filename = extFromFilename(params.filename) ? params.filename : params.filenameHint || params.filename;
+    const ext = this.assertUploadFile({ ...params, filename, type: scope.type });
     const allowPrefix = `${this.getEnvPrefix()}/${scope.module}/${scope.type}/${params.userId}/`;
     const digest = createHash('md5').update(params.buffer).digest('hex');
     const key = `${allowPrefix}${digest}.${ext}`;

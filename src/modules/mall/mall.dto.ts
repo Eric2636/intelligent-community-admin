@@ -1,4 +1,5 @@
-import { ArrayMaxSize, IsArray, IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ArrayMaxSize, IsArray, IsIn, IsNumber, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 export class GetMallItemsQueryDto {
   @IsOptional()
@@ -44,6 +45,26 @@ export class PublishMallItemDto {
   @IsString()
   @MaxLength(500)
   contact?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  locationName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  locationAddress?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  latitude?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  longitude?: number;
 
   @IsOptional()
   @IsArray()

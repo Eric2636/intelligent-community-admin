@@ -24,6 +24,15 @@ export class GetForumPostsQueryDto {
   pageSize?: number = 10;
 }
 
+export class GetForumAnnouncementsQueryDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  @Type(() => Number)
+  limit?: number = 5;
+}
+
 export class PublishForumPostDto {
   @IsString()
   title!: string;

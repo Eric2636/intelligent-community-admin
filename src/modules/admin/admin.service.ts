@@ -98,6 +98,7 @@ const TASK_STATUS_SET = new Set<TaskStatus>([
   'COMPLETED',
   'CANCELLED',
 ]);
+const FORUM_POST_TYPE_SET = new Set(['NORMAL', 'ANNOUNCEMENT']);
 
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
@@ -110,6 +111,21 @@ function parseRewardYuan(raw: string): { value: string } | { error: string } {
   if (Number.isNaN(n) || n <= 0) return { error: '请输入有效佣金（元）' };
   if (n > 99999) return { error: '佣金金额过大' };
   return { value: String(n) };
+}
+
+function parseForumPostType(raw: string | undefined): 'NORMAL' | 'ANNOUNCEMENT' {
+  const value = String(raw || 'NORMAL').trim();
+  return FORUM_POST_TYPE_SET.has(value) ? (value as 'NORMAL' | 'ANNOUNCEMENT') : 'NORMAL';
+}
+
+function parseAnnouncementValidUntil(raw: string | undefined, postType: 'NORMAL' | 'ANNOUNCEMENT') {
+  if (postType !== 'ANNOUNCEMENT') return null;
+  const value = String(raw || '').trim();
+  if (!value) throw new HttpError(400, '公告请选择过期时间');
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new HttpError(400, '公告过期时间无效');
+  if (date.getTime() <= Date.now()) throw new HttpError(400, '公告过期时间必须晚于当前时间');
+  return date;
 }
 
 export class AdminService {
@@ -952,7 +968,14 @@ export class AdminService {
       prisma.forumPost.count({ where }),
       prisma.forumPost.findMany({ where, orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }], ...this.pageArgs(params) }),
     ]);
-    return { total, list: rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })) };
+    return {
+      total,
+      list: rows.map((row) => ({
+        ...row,
+        createdAt: row.createdAt.toISOString(),
+        validUntil: row.validUntil ? row.validUntil.toISOString() : null,
+      })),
+    };
   }
 
   private async listItems(params: { page: number; pageSize: number; keyword?: string; visibility?: 'ONLINE' | 'OFFLINE' }) {
@@ -1126,6 +1149,8 @@ export class AdminService {
     if (type === 'posts') {
       const title = (dto.title || '').trim();
       const content = (dto.content || '').trim();
+      const postType = parseForumPostType(dto.postType);
+      const validUntil = parseAnnouncementValidUntil(dto.validUntil, postType);
       const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
       const videos = parseStrictMediaUrlList(dto.videos, MAX_POST_VIDEOS, 'video', 'videos');
       if (!title) throw new HttpError(400, '请输入标题');
@@ -1147,12 +1172,18 @@ export class AdminService {
           authorAvatar: author?.avatar ?? null,
           adminLabel,
           createdByAdminId: operator.adminId,
+          postType,
+          validUntil,
           visibility: vis,
           pinned: pin,
         },
       });
       await invalidateForumPostListCache();
-      return { ...row, createdAt: row.createdAt.toISOString() };
+      return {
+        ...row,
+        createdAt: row.createdAt.toISOString(),
+        validUntil: row.validUntil ? row.validUntil.toISOString() : null,
+      };
     }
 
     if (type === 'items') {
@@ -1178,6 +1209,10 @@ export class AdminService {
           unit: (dto.unit?.trim() || '元').slice(0, 16),
           desc,
           contact: dto.contact?.trim() || null,
+          locationName: dto.locationName?.trim() || null,
+          locationAddress: dto.locationAddress?.trim() || null,
+          latitude: Number.isFinite(dto.latitude) ? dto.latitude : null,
+          longitude: Number.isFinite(dto.longitude) ? dto.longitude : null,
           mainImages: normalizedMainImages.length ? jsonImages(normalizedMainImages) : undefined,
           subImages: normalizedSubImages.length ? jsonImages(normalizedSubImages) : undefined,
           videos: videos.length ? jsonImages(videos) : undefined,
@@ -1258,6 +1293,8 @@ export class AdminService {
       dto.contact !== undefined ||
       dto.visibility !== undefined ||
       dto.pinned !== undefined ||
+      dto.postType !== undefined ||
+      dto.validUntil !== undefined ||
       dto.status !== undefined ||
       dto.images !== undefined ||
       dto.videos !== undefined ||
@@ -1324,6 +1361,15 @@ export class AdminService {
       if (dto.content !== undefined) data.content = dto.content.trim();
       if (dto.visibility !== undefined) data.visibility = dto.visibility;
       if (dto.pinned !== undefined) data.pinned = dto.pinned;
+      if (dto.postType !== undefined || dto.validUntil !== undefined) {
+        const nextPostType =
+          dto.postType !== undefined ? parseForumPostType(dto.postType) : (existing.postType as 'NORMAL' | 'ANNOUNCEMENT');
+        data.postType = nextPostType;
+        data.validUntil =
+          nextPostType === 'ANNOUNCEMENT'
+            ? parseAnnouncementValidUntil(dto.validUntil ?? existing.validUntil?.toISOString(), nextPostType)
+            : null;
+      }
       if (dto.images !== undefined) {
         const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
         data.images = jsonMedia(images);
@@ -1344,7 +1390,11 @@ export class AdminService {
       }
       const row = await prisma.forumPost.update({ where: { id }, data });
       await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
-      return { ...row, createdAt: row.createdAt.toISOString() };
+      return {
+        ...row,
+        createdAt: row.createdAt.toISOString(),
+        validUntil: row.validUntil ? row.validUntil.toISOString() : null,
+      };
     }
 
     if (type === 'items') {
@@ -1358,6 +1408,10 @@ export class AdminService {
       if (dto.price !== undefined) data.price = dto.price.trim() || null;
       if (dto.unit !== undefined) data.unit = (dto.unit.trim() || '元').slice(0, 16);
       if (dto.contact !== undefined) data.contact = dto.contact.trim() || null;
+      if (dto.locationName !== undefined) data.locationName = dto.locationName.trim() || null;
+      if (dto.locationAddress !== undefined) data.locationAddress = dto.locationAddress.trim() || null;
+      if (dto.latitude !== undefined) data.latitude = Number.isFinite(dto.latitude) ? dto.latitude : null;
+      if (dto.longitude !== undefined) data.longitude = Number.isFinite(dto.longitude) ? dto.longitude : null;
       if (dto.visibility !== undefined) data.visibility = dto.visibility;
       if (dto.pinned !== undefined) data.pinned = dto.pinned;
       if (dto.actorUserId !== undefined) {

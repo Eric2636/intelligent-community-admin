@@ -1,3 +1,4 @@
+import { Type } from 'class-transformer';
 import { IsArray, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class GetTasksQueryDto {
@@ -8,12 +9,14 @@ export class GetTasksQueryDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Type(() => Number)
   page?: number = 1;
 
   @IsOptional()
   @IsInt()
   @Min(1)
   @Max(50)
+  @Type(() => Number)
   pageSize?: number = 50;
 }
 
@@ -68,4 +71,3 @@ export class SaveTaskDraftDto {
   @IsArray()
   videos?: string[];
 }
-

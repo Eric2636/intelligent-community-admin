@@ -144,7 +144,7 @@ export function registerAdminRoutes(
 
   router.get('/api/admin/users-mini', adminAuth, async (ctx) => {
     if (!requireSuperAdmin(ctx)) return;
-    const idsRaw = String((ctx.query as any)?.ids || '').trim();
+    const idsRaw = String((ctx.query as { ids?: string })?.ids || '').trim();
     const ids = idsRaw ? idsRaw.split(',').map((x) => x.trim()).filter(Boolean) : [];
     ctx.body = { code: 200, data: await adminService.listUsersMiniByIds({ ids }) };
   });

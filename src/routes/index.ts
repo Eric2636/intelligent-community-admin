@@ -16,6 +16,7 @@ import {
 } from '../modules/errand/errand.dto';
 import { ErrandService } from '../modules/errand/errand.service';
 import {
+  GetForumAnnouncementsQueryDto,
   GetForumPostsQueryDto,
   PublishForumPostDto,
   PublishForumReplyDto,
@@ -127,6 +128,13 @@ export function createRouter() {
   router.get('/api/posts/my-favorites', jwtAuth, async (ctx) => {
     const userId = ctx.state.user!.userId;
     const data = await forumService.getMyFavoritePosts({ userId });
+    ctx.body = { code: 200, data };
+  });
+
+  router.get('/api/posts/announcements', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const q = await parseDto(GetForumAnnouncementsQueryDto, ctx.query);
+    const data = await forumService.listAnnouncements({ userId, limit: q.limit });
     ctx.body = { code: 200, data };
   });
 
@@ -242,6 +250,11 @@ export function createRouter() {
     const userId = ctx.state.user!.userId;
     const postId = String((ctx.params as { postId?: string }).postId || '').trim();
     ctx.body = { code: 200, data: await forumService.unfavorite({ userId, postId }) };
+  });
+
+  router.post('/api/posts/:postId/share', jwtAuth, async (ctx) => {
+    const postId = String((ctx.params as { postId?: string }).postId || '').trim();
+    ctx.body = { code: 200, data: await forumService.share({ postId }) };
   });
 
   // 跑腿列表
@@ -474,6 +487,7 @@ export function createRouter() {
       module: form.fields.module,
       type: form.fields.type,
       filename: file.filename,
+      filenameHint: form.fields.filenameHint,
       contentType: file.contentType,
       buffer: file.buffer,
     });

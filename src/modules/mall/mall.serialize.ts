@@ -18,6 +18,10 @@ export function serializeMallItem(
     unit: string;
     desc: string;
     contact: string | null;
+    locationName?: string | null;
+    locationAddress?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
     mainImages: Prisma.JsonValue | null;
     subImages: Prisma.JsonValue | null;
     videos: Prisma.JsonValue | null;
@@ -58,6 +62,10 @@ export function serializeMallItem(
     unit: row.unit,
     desc: row.desc,
     contact: row.contact ?? '',
+    locationName: row.locationName ?? '',
+    locationAddress: row.locationAddress ?? '',
+    latitude: row.latitude ?? null,
+    longitude: row.longitude ?? null,
     // 新字段（推荐）
     mainImages: normalizedMainImages,
     subImages: normalizedSubImages,

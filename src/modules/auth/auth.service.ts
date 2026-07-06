@@ -36,6 +36,12 @@ type WechatPhoneNumberResponse = {
 let cachedAccessToken = '';
 let cachedAccessTokenExpiresAt = 0;
 
+function maskCode(code: string) {
+  const v = String(code || '');
+  if (v.length <= 8) return { len: v.length, head: v.slice(0, 2), tail: v.slice(-2) };
+  return { len: v.length, head: v.slice(0, 4), tail: v.slice(-4) };
+}
+
 export class AuthService {
   private async code2Session(code: string): Promise<WechatSession> {
     const appid = process.env.WX_APPID;
@@ -59,11 +65,18 @@ export class AuthService {
 
     const data = r.data || {};
     if (!data.openid) {
+      console.warn('[wechat.code2Session.fail]', {
+        appid,
+        code: maskCode(code),
+        errcode: data.errcode,
+        errmsg: data.errmsg,
+      });
       throw new HttpError(
         401,
         data.errmsg ? `微信登录失败：${data.errmsg}` : '微信登录失败',
       );
     }
+    console.info('[wechat.code2Session.ok]', { appid, code: maskCode(code) });
     return { ...data, openid: data.openid };
   }
 
@@ -161,6 +174,10 @@ export class AuthService {
   }
 
   async wechatPhoneLogin(dto: WechatPhoneLoginDto) {
+    console.info('[wechat.phoneLogin.start]', {
+      loginCode: maskCode(dto.code),
+      phoneCode: maskCode(dto.phoneCode),
+    });
     const session = await this.code2Session(dto.code);
     const accessToken = await this.getWechatAccessToken();
     const r = await axios.post<WechatPhoneNumberResponse>(

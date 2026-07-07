@@ -25,7 +25,13 @@ import {
 import { ForumService } from '../modules/forum/forum.service';
 import { MallService } from '../modules/mall/mall.service';
 import { SettingsService } from '../modules/settings/settings.service';
-import { ClaimTaskDto, CreateTaskDto, GetTasksQueryDto, SaveTaskDraftDto } from '../modules/task/task.dto';
+import {
+  ClaimTaskDto,
+  CreateTaskDto,
+  GetTasksQueryDto,
+  SaveTaskDraftDto,
+  SubmitTaskCompleteDto,
+} from '../modules/task/task.dto';
 import { TaskService } from '../modules/task/task.service';
 import { CosCredentialsDto, PresignDto } from '../modules/upload/upload.dto';
 import { UploadService } from '../modules/upload/upload.service';
@@ -396,6 +402,28 @@ export function createRouter() {
     const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
     const dto = await parseDto(ClaimTaskDto, jsonBody(ctx));
     const data = await taskService.claimTask({ taskId, userId, takerName: dto.takerName });
+    ctx.body = { code: 200, data };
+  });
+
+  // 接单人提交完成说明
+  router.post('/api/tasks/:taskId/submit-complete', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
+    const dto = await parseDto(SubmitTaskCompleteDto, jsonBody(ctx));
+    const data = await taskService.submitComplete({
+      taskId,
+      userId,
+      proofText: dto.proofText,
+      proofImages: dto.proofImages,
+    });
+    ctx.body = { code: 200, data };
+  });
+
+  // 发布者确认任务完成
+  router.post('/api/tasks/:taskId/confirm-complete', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
+    const data = await taskService.confirmComplete({ taskId, userId });
     ctx.body = { code: 200, data };
   });
 

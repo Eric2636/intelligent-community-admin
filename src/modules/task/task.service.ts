@@ -230,6 +230,51 @@ export class TaskService {
     });
   }
 
+  async submitComplete(params: { taskId: string; userId: string; proofText?: string; proofImages?: string[] }) {
+    const id = String(params.taskId || '').trim();
+    if (!id) throw new HttpError(400, 'taskId 不能为空');
+    const proofText = String(params.proofText || '').trim();
+    const proofImages = parseStrictMediaUrlList(params.proofImages, MAX_TASK_IMAGES, 'image', 'proofImages');
+    if (!proofText && proofImages.length === 0) throw new HttpError(400, '请填写完成说明或上传凭证图片');
+
+    return prisma.$transaction(async (tx) => {
+      const row = await tx.task.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+      if (!row) throw new HttpError(404, '任务不存在');
+      if (row.takerId !== params.userId) throw new HttpError(403, '仅接单人可提交完成');
+      if (row.status !== 'IN_PROGRESS') throw new HttpError(400, '该任务当前不可提交完成');
+      const updated = await tx.task.update({
+        where: { id },
+        data: {
+          status: 'PENDING_CONFIRM',
+          proofText,
+          proofImages,
+          completedAt: new Date(),
+        },
+      });
+      return this.mapTask(updated);
+    });
+  }
+
+  async confirmComplete(params: { taskId: string; userId: string }) {
+    const id = String(params.taskId || '').trim();
+    if (!id) throw new HttpError(400, 'taskId 不能为空');
+
+    return prisma.$transaction(async (tx) => {
+      const row = await tx.task.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+      if (!row) throw new HttpError(404, '任务不存在');
+      if (row.publisherId !== params.userId) throw new HttpError(403, '仅发布者可确认完成');
+      if (row.status !== 'PENDING_CONFIRM') throw new HttpError(400, '该任务当前不可确认完成');
+      const updated = await tx.task.update({
+        where: { id },
+        data: {
+          status: 'COMPLETED',
+          confirmedAt: new Date(),
+        },
+      });
+      return this.mapTask(updated);
+    });
+  }
+
   async revokePublish(params: { taskId: string; userId: string }) {
     const id = String(params.taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');

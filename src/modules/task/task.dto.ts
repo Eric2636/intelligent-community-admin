@@ -77,3 +77,13 @@ export class ClaimTaskDto {
   @IsString()
   takerName?: string;
 }
+
+export class SubmitTaskCompleteDto {
+  @IsOptional()
+  @IsString()
+  proofText?: string;
+
+  @IsOptional()
+  @IsArray()
+  proofImages?: string[];
+}

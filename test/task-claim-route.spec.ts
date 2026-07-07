@@ -11,3 +11,18 @@ test('registers the task claim endpoint used by the mini program', () => {
 
   assert.equal(hasTaskClaimRoute, true);
 });
+
+test('registers task completion endpoints used by the mini program', () => {
+  const router = createRouter();
+
+  assert.equal(
+    router.stack.some((layer) => layer.path === '/api/tasks/:taskId/submit-complete' && layer.methods.includes('POST')),
+    true,
+  );
+  assert.equal(
+    router.stack.some(
+      (layer) => layer.path === '/api/tasks/:taskId/confirm-complete' && layer.methods.includes('POST'),
+    ),
+    true,
+  );
+});

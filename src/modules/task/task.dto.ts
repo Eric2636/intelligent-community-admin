@@ -71,3 +71,9 @@ export class SaveTaskDraftDto {
   @IsArray()
   videos?: string[];
 }
+
+export class ClaimTaskDto {
+  @IsOptional()
+  @IsString()
+  takerName?: string;
+}

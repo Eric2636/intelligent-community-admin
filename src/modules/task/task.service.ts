@@ -14,6 +14,11 @@ const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
 
 export class TaskService {
+  private async getUserDisplayName(userId: string) {
+    const row = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
+    return row?.name ?? '邻居';
+  }
+
   async getTaskDetail(taskId: string) {
     const id = String(taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
@@ -196,6 +201,33 @@ export class TaskService {
     });
 
     return rows.map((t) => this.mapTask(t));
+  }
+
+  async claimTask(params: { taskId: string; userId: string; takerName?: string }) {
+    const id = String(params.taskId || '').trim();
+    if (!id) throw new HttpError(400, 'taskId 不能为空');
+    return prisma.$transaction(async (tx) => {
+      const row = await tx.task.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+      if (!row) throw new HttpError(404, '任务不存在');
+      if (row.publisherId === params.userId) throw new HttpError(400, '不能领取自己发布的任务');
+      if (row.status !== 'PENDING_TAKE') throw new HttpError(400, '该任务已被领取或已结束');
+
+      const takerName =
+        (params.takerName && String(params.takerName).trim()) || (await this.getUserDisplayName(params.userId));
+      const updated = await tx.task.update({
+        where: { id },
+        data: {
+          status: 'IN_PROGRESS',
+          takerId: params.userId,
+          takerName,
+          claimedAt: new Date(),
+        },
+      });
+      return this.mapTask(updated);
+    }).then(async (mapped) => {
+      await invalidatePendingTasksListCache();
+      return mapped;
+    });
   }
 
   async revokePublish(params: { taskId: string; userId: string }) {

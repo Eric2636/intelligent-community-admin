@@ -25,7 +25,7 @@ import {
 import { ForumService } from '../modules/forum/forum.service';
 import { MallService } from '../modules/mall/mall.service';
 import { SettingsService } from '../modules/settings/settings.service';
-import { CreateTaskDto, GetTasksQueryDto, SaveTaskDraftDto } from '../modules/task/task.dto';
+import { ClaimTaskDto, CreateTaskDto, GetTasksQueryDto, SaveTaskDraftDto } from '../modules/task/task.dto';
 import { TaskService } from '../modules/task/task.service';
 import { CosCredentialsDto, PresignDto } from '../modules/upload/upload.dto';
 import { UploadService } from '../modules/upload/upload.service';
@@ -387,6 +387,15 @@ export function createRouter() {
   router.get('/api/tasks/:taskId', async (ctx) => {
     const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
     const data = await taskService.getTaskDetail(taskId);
+    ctx.body = { code: 200, data };
+  });
+
+  // 领取任务
+  router.post('/api/tasks/:taskId/claim', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
+    const dto = await parseDto(ClaimTaskDto, jsonBody(ctx));
+    const data = await taskService.claimTask({ taskId, userId, takerName: dto.takerName });
     ctx.body = { code: 200, data };
   });
 

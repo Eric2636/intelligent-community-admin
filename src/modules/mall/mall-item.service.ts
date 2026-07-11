@@ -11,13 +11,12 @@ import {
   MALL_ITEM_DETAIL_TTL_SEC,
   MALL_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
-import { MALL_CATEGORIES, MALL_LIST_CAP } from './mall.constants';
+import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
+import { MallCategoryService } from './mall-category.service';
 import { jsonImages, parsePriceNum, serializeMallItem } from './mall.serialize';
 
 export class MallItemService {
-  listCategories() {
-    return MALL_CATEGORIES;
-  }
+  private readonly categories = new MallCategoryService();
 
   async listItems(params: {
     categoryId?: string;
@@ -104,7 +103,7 @@ export class MallItemService {
 
     const row = await prisma.mallItem.create({
       data: {
-        categoryId: params.categoryId.trim(),
+        categoryId: await this.categories.assertEnabledCategoryId(params.categoryId),
         title: params.title.trim(),
         price: params.price?.trim() || null,
         unit: (params.unit?.trim() || '元').slice(0, 16),
@@ -119,7 +118,7 @@ export class MallItemService {
         videos: videos.length ? jsonImages(videos) : undefined,
         images: legacyImages.length ? jsonImages(legacyImages) : undefined,
         publisherId: params.userId,
-        visibility: 'OFFLINE',
+        visibility: MALL_DEFAULT_VISIBILITY,
       },
     });
     const s = serializeMallItem(row);

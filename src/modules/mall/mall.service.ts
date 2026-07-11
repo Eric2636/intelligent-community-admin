@@ -2,6 +2,7 @@ import { MallFavoriteService } from './mall-favorite.service';
 import { MallItemService } from './mall-item.service';
 import { MallOrderService } from './mall-order.service';
 import { MallCommentService } from './mall-comment.service';
+import { MallCategoryService } from './mall-category.service';
 
 /**
  * 小区市场聚合入口，对外保持与原 MallService 相同的方法签名，便于路由与其它模块调用。
@@ -11,9 +12,10 @@ export class MallService {
   private readonly favorites = new MallFavoriteService();
   private readonly orders = new MallOrderService();
   private readonly comments = new MallCommentService();
+  private readonly categories = new MallCategoryService();
 
   listCategories() {
-    return this.items.listCategories();
+    return this.categories.listCategories();
   }
 
   listItems(params: Parameters<MallItemService['listItems']>[0]) {

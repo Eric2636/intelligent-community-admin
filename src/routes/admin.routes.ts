@@ -10,7 +10,9 @@ import {
   AdminSystemLogQueryDto,
   AdminUpdateContentDto,
   BatchUpdateContentStateDto,
+  CreateMallCategoryDto,
   CreateAdminUserDto,
+  UpdateMallCategoryDto,
   UpdateAdminUserDto,
   UpdateContentStateDto,
   UpdateUserEnabledDto,
@@ -18,6 +20,7 @@ import {
 import { AdminService } from '../modules/admin/admin.service';
 import { MiniApiErrorLogQueryDto } from '../modules/client-log/client-log.dto';
 import { ClientLogService } from '../modules/client-log/client-log.service';
+import { MallCategoryService } from '../modules/mall/mall-category.service';
 import { UpdateModuleTabEnabledDto } from '../modules/settings/settings.dto';
 import { SettingsService } from '../modules/settings/settings.service';
 import { CosCredentialsDto } from '../modules/upload/upload.dto';
@@ -27,6 +30,7 @@ import { jsonBody } from './json-body';
 
 const contentTypes = new Set(['errands', 'posts', 'items', 'tasks']);
 const uploadService = new UploadService();
+const mallCategoryService = new MallCategoryService();
 const uploadMaxBytes = Number(process.env.UPLOAD_MAX_BYTES || String(100 * 1024 * 1024));
 
 function pageOf(q: { page?: number; pageSize?: number }) {
@@ -246,6 +250,29 @@ export function registerAdminRoutes(
       detail: { adminId },
     });
     ctx.body = { code: 200, data: await adminService.superAdminUnlockAdminLogin(adminId) };
+  });
+
+  router.get('/api/admin/mall-categories', adminAuth, async (ctx) => {
+    ctx.body = { code: 200, data: await mallCategoryService.listCategories({ includeDisabled: true }) };
+  });
+
+  router.post('/api/admin/mall-categories', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const dto = await parseDto(CreateMallCategoryDto, jsonBody(ctx));
+    ctx.body = { code: 200, data: await mallCategoryService.createCategory(dto) };
+  });
+
+  router.patch('/api/admin/mall-categories/:id', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const id = String((ctx.params as { id?: string }).id || '').trim();
+    const dto = await parseDto(UpdateMallCategoryDto, jsonBody(ctx));
+    ctx.body = { code: 200, data: await mallCategoryService.updateCategory(id, dto) };
+  });
+
+  router.delete('/api/admin/mall-categories/:id', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const id = String((ctx.params as { id?: string }).id || '').trim();
+    ctx.body = { code: 200, data: await mallCategoryService.deleteCategory(id) };
   });
 
   router.get('/api/admin/contents/:type', adminAuth, async (ctx) => {

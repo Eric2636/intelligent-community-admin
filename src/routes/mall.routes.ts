@@ -13,7 +13,7 @@ import { CreateMallItemCommentDto } from '../modules/mall/mall-comment.dto';
 
 export function registerMallRoutes(router: Router, mallService: MallService) {
   router.get('/api/categories', jwtAuth, async (ctx) => {
-    const data = mallService.listCategories();
+    const data = await mallService.listCategories();
     ctx.body = { code: 200, data };
   });
 

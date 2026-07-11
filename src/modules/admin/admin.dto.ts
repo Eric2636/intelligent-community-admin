@@ -44,6 +44,37 @@ export class AdminSystemLogQueryDto extends AdminListQueryDto {
   action?: string;
 }
 
+export class CreateMallCategoryDto {
+  @IsString()
+  @MinLength(1)
+  name!: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  sortOrder?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+}
+
+export class UpdateMallCategoryDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  name?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  sortOrder?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+}
+
 export class CreateAdminUserDto {
   @IsString()
   @MinLength(3)

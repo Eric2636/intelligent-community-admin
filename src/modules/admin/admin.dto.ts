@@ -1,4 +1,5 @@
-import { IsArray, IsBoolean, IsIn, IsOptional, IsString, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsArray, IsBoolean, IsDateString, IsIn, IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class AdminLoginDto {
   @IsString()
@@ -41,6 +42,37 @@ export class AdminSystemLogQueryDto extends AdminListQueryDto {
   @IsOptional()
   @IsString()
   action?: string;
+}
+
+export class CreateMallCategoryDto {
+  @IsString()
+  @MinLength(1)
+  name!: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  sortOrder?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+}
+
+export class UpdateMallCategoryDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  name?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  sortOrder?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
 }
 
 export class CreateAdminUserDto {
@@ -163,12 +195,38 @@ export class AdminCreateContentDto {
   contact?: string;
 
   @IsOptional()
+  @IsString()
+  locationName?: string;
+
+  @IsOptional()
+  @IsString()
+  locationAddress?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  latitude?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  longitude?: number;
+
+  @IsOptional()
   @IsIn(['ONLINE', 'OFFLINE'])
   visibility?: 'ONLINE' | 'OFFLINE';
 
   @IsOptional()
   @IsBoolean()
   pinned?: boolean;
+
+  @IsOptional()
+  @IsIn(['NORMAL', 'ANNOUNCEMENT'])
+  postType?: 'NORMAL' | 'ANNOUNCEMENT';
+
+  @IsOptional()
+  @IsDateString()
+  validUntil?: string;
 
   @IsOptional()
   @IsArray()
@@ -234,12 +292,38 @@ export class AdminUpdateContentDto {
   contact?: string;
 
   @IsOptional()
+  @IsString()
+  locationName?: string;
+
+  @IsOptional()
+  @IsString()
+  locationAddress?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  latitude?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  longitude?: number;
+
+  @IsOptional()
   @IsIn(['ONLINE', 'OFFLINE'])
   visibility?: 'ONLINE' | 'OFFLINE';
 
   @IsOptional()
   @IsBoolean()
   pinned?: boolean;
+
+  @IsOptional()
+  @IsIn(['NORMAL', 'ANNOUNCEMENT'])
+  postType?: 'NORMAL' | 'ANNOUNCEMENT';
+
+  @IsOptional()
+  @IsDateString()
+  validUntil?: string;
 
   /** errands: PENDING_TAKE | IN_PROGRESS | COMPLETED；tasks: TaskStatus 枚举字符串 */
   @IsOptional()

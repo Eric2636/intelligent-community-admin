@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import { TaskStatus, type Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
 import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
@@ -14,6 +14,11 @@ const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
 
 export class TaskService {
+  private async getUserDisplayName(userId: string) {
+    const row = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
+    return row?.name ?? '邻居';
+  }
+
   async getTaskDetail(taskId: string) {
     const id = String(taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
@@ -161,12 +166,112 @@ export class TaskService {
 
       const rows = await prisma.task.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
         skip,
         take: pageSize,
       });
 
       return rows.map((t) => this.mapTask(t));
+    });
+  }
+
+  async getMyTasks(params: { userId: string; type?: string }) {
+    const type = String(params.type || 'published').trim();
+    const where: Prisma.TaskWhereInput = {
+      visibility: 'ONLINE',
+      ...contentNotDeleted,
+    };
+
+    if (type === 'taken') {
+      where.takerId = params.userId;
+    } else if (type === 'draft') {
+      where.publisherId = params.userId;
+      where.status = TaskStatus.DRAFT;
+    } else if (type === 'cancelled') {
+      where.publisherId = params.userId;
+      where.status = TaskStatus.CANCELLED;
+    } else {
+      where.publisherId = params.userId;
+      where.status = { notIn: [TaskStatus.DRAFT, TaskStatus.CANCELLED] };
+    }
+
+    const rows = await prisma.task.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return rows.map((t) => this.mapTask(t));
+  }
+
+  async claimTask(params: { taskId: string; userId: string; takerName?: string }) {
+    const id = String(params.taskId || '').trim();
+    if (!id) throw new HttpError(400, 'taskId 不能为空');
+    return prisma.$transaction(async (tx) => {
+      const row = await tx.task.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+      if (!row) throw new HttpError(404, '任务不存在');
+      if (row.publisherId === params.userId) throw new HttpError(400, '不能领取自己发布的任务');
+      if (row.status !== 'PENDING_TAKE') throw new HttpError(400, '该任务已被领取或已结束');
+
+      const takerName =
+        (params.takerName && String(params.takerName).trim()) || (await this.getUserDisplayName(params.userId));
+      const updated = await tx.task.update({
+        where: { id },
+        data: {
+          status: 'IN_PROGRESS',
+          takerId: params.userId,
+          takerName,
+          claimedAt: new Date(),
+        },
+      });
+      return this.mapTask(updated);
+    }).then(async (mapped) => {
+      await invalidatePendingTasksListCache();
+      return mapped;
+    });
+  }
+
+  async submitComplete(params: { taskId: string; userId: string; proofText?: string; proofImages?: string[] }) {
+    const id = String(params.taskId || '').trim();
+    if (!id) throw new HttpError(400, 'taskId 不能为空');
+    const proofText = String(params.proofText || '').trim();
+    const proofImages = parseStrictMediaUrlList(params.proofImages, MAX_TASK_IMAGES, 'image', 'proofImages');
+    if (!proofText && proofImages.length === 0) throw new HttpError(400, '请填写完成说明或上传凭证图片');
+
+    return prisma.$transaction(async (tx) => {
+      const row = await tx.task.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+      if (!row) throw new HttpError(404, '任务不存在');
+      if (row.takerId !== params.userId) throw new HttpError(403, '仅接单人可提交完成');
+      if (row.status !== 'IN_PROGRESS') throw new HttpError(400, '该任务当前不可提交完成');
+      const updated = await tx.task.update({
+        where: { id },
+        data: {
+          status: 'PENDING_CONFIRM',
+          proofText,
+          proofImages,
+          completedAt: new Date(),
+        },
+      });
+      return this.mapTask(updated);
+    });
+  }
+
+  async confirmComplete(params: { taskId: string; userId: string }) {
+    const id = String(params.taskId || '').trim();
+    if (!id) throw new HttpError(400, 'taskId 不能为空');
+
+    return prisma.$transaction(async (tx) => {
+      const row = await tx.task.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+      if (!row) throw new HttpError(404, '任务不存在');
+      if (row.publisherId !== params.userId) throw new HttpError(403, '仅发布者可确认完成');
+      if (row.status !== 'PENDING_CONFIRM') throw new HttpError(400, '该任务当前不可确认完成');
+      const updated = await tx.task.update({
+        where: { id },
+        data: {
+          status: 'COMPLETED',
+          confirmedAt: new Date(),
+        },
+      });
+      return this.mapTask(updated);
     });
   }
 

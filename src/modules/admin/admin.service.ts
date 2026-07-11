@@ -7,7 +7,9 @@ import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import {
+  invalidateErrandListCache,
   invalidateErrandRepliesCache,
+  invalidateForumPostListCache,
   invalidateForumPostRepliesCache,
   invalidateMallItemDetailCache,
   invalidateMallItemsListCache,
@@ -16,7 +18,7 @@ import {
 import { getRedisClient } from '../../lib/redis-cache';
 import type { AdminCreateContentDto, AdminUpdateContentDto } from './admin.dto';
 import { MallCommentService } from '../mall/mall-comment.service';
-import { MALL_CATEGORIES } from '../mall/mall.constants';
+import { MallCategoryService } from '../mall/mall-category.service';
 import { jsonImages } from '../mall/mall.serialize';
 import {
   createCaptcha,
@@ -34,6 +36,7 @@ type AdminTokenPayload = {
   sub: string;
   username: string;
   role: 'ADMIN' | 'SUPERADMIN';
+  typ: 'access' | 'refresh';
 };
 
 function randomAdminPassword(length = 14): string {
@@ -95,6 +98,7 @@ const TASK_STATUS_SET = new Set<TaskStatus>([
   'COMPLETED',
   'CANCELLED',
 ]);
+const FORUM_POST_TYPE_SET = new Set(['NORMAL', 'ANNOUNCEMENT']);
 
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
@@ -109,8 +113,24 @@ function parseRewardYuan(raw: string): { value: string } | { error: string } {
   return { value: String(n) };
 }
 
+function parseForumPostType(raw: string | undefined): 'NORMAL' | 'ANNOUNCEMENT' {
+  const value = String(raw || 'NORMAL').trim();
+  return FORUM_POST_TYPE_SET.has(value) ? (value as 'NORMAL' | 'ANNOUNCEMENT') : 'NORMAL';
+}
+
+function parseAnnouncementValidUntil(raw: string | undefined, postType: 'NORMAL' | 'ANNOUNCEMENT') {
+  if (postType !== 'ANNOUNCEMENT') return null;
+  const value = String(raw || '').trim();
+  if (!value) throw new HttpError(400, '公告请选择过期时间');
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new HttpError(400, '公告过期时间无效');
+  if (date.getTime() <= Date.now()) throw new HttpError(400, '公告过期时间必须晚于当前时间');
+  return date;
+}
+
 export class AdminService {
   private readonly mallComments = new MallCommentService();
+  private readonly mallCategories = new MallCategoryService();
 
   async writeSystemLog(params: {
     adminId: string;
@@ -183,7 +203,17 @@ export class AdminService {
     captchaCode?: string;
     ip?: string;
   }): Promise<
-    | { ok: true; data: { token: string; expiresIn: string; admin: ReturnType<typeof mapAdmin> } }
+    | {
+        ok: true;
+        data: {
+          token: string;
+          accessToken: string;
+          refreshToken: string;
+          expiresIn: string;
+          refreshExpiresIn: string;
+          admin: ReturnType<typeof mapAdmin>;
+        };
+      }
     | { ok: false; statusCode: number; body: any }
   > {
     const username = String(params.username || '').trim();
@@ -298,21 +328,54 @@ export class AdminService {
     const secret = adminJwtSecret();
     if (!secret) throw new HttpError(500, '后端未配置 ADMIN_JWT_SECRET 或 JWT_SECRET');
 
-    const expiresIn = process.env.ADMIN_JWT_EXPIRES_IN || process.env.JWT_EXPIRES_IN || '7d';
-    const payload: AdminTokenPayload = {
+    const expiresIn = process.env.ADMIN_JWT_EXPIRES_IN || '3h';
+    const refreshExpiresIn = process.env.ADMIN_REFRESH_JWT_EXPIRES_IN || '3h';
+    const basePayload = {
       sub: admin.id,
       username: admin.username,
       role: admin.role,
-    };
+    } satisfies Omit<AdminTokenPayload, 'typ'>;
     const signOpts: SignOptions = { expiresIn: expiresIn as SignOptions['expiresIn'] };
-    const token = jwt.sign(payload, secret, signOpts);
+    const refreshSignOpts: SignOptions = { expiresIn: refreshExpiresIn as SignOptions['expiresIn'] };
+    const token = jwt.sign({ ...basePayload, typ: 'access' }, secret, signOpts);
+    const refreshToken = jwt.sign({ ...basePayload, typ: 'refresh' }, secret, refreshSignOpts);
     const updated = await prisma.adminUser.update({
       where: { id: admin.id },
       data: { lastLoginAt: new Date() },
       select: adminSelect(),
     });
 
-    return { token, expiresIn, admin: mapAdmin(updated) };
+    return { token, accessToken: token, refreshToken, expiresIn, refreshExpiresIn, admin: mapAdmin(updated) };
+  }
+
+  async refreshToken(refreshTokenRaw: string) {
+    const refreshToken = String(refreshTokenRaw || '').trim();
+    if (!refreshToken) throw new HttpError(401, 'refreshToken 不能为空');
+
+    const secret = adminJwtSecret();
+    if (!secret) throw new HttpError(500, '后端未配置 ADMIN_JWT_SECRET 或 JWT_SECRET');
+
+    let payload: AdminTokenPayload;
+    try {
+      payload = jwt.verify(refreshToken, secret) as AdminTokenPayload;
+    } catch {
+      throw new HttpError(401, 'refreshToken 无效或已过期');
+    }
+    if (payload.typ !== 'refresh') throw new HttpError(401, 'refreshToken 类型错误');
+
+    const admin = await prisma.adminUser.findUnique({ where: { id: payload.sub }, select: adminSelect() });
+    if (!admin) throw new HttpError(404, '管理员不存在');
+    if (!admin.enabled) throw new HttpError(403, '管理员账号已停用');
+
+    const expiresIn = process.env.ADMIN_JWT_EXPIRES_IN || '3h';
+    const accessPayload: AdminTokenPayload = {
+      sub: admin.id,
+      username: admin.username,
+      role: admin.role,
+      typ: 'access',
+    };
+    const token = jwt.sign(accessPayload, secret, { expiresIn: expiresIn as SignOptions['expiresIn'] });
+    return { token, accessToken: token, expiresIn, admin: mapAdmin(admin) };
   }
 
   async getMe(adminId: string) {
@@ -349,6 +412,7 @@ export class AdminService {
         select: {
           id: true,
           openid: true,
+          phoneNumber: true,
           name: true,
           avatar: true,
           gender: true,
@@ -402,6 +466,7 @@ export class AdminService {
       select: {
         id: true,
         openid: true,
+        phoneNumber: true,
         name: true,
         avatar: true,
         gender: true,
@@ -635,7 +700,9 @@ export class AdminService {
       });
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
-      return prisma.errand.update({ where: { id }, data });
+      const updated = await prisma.errand.update({ where: { id }, data });
+      await invalidateErrandListCache();
+      return updated;
     }
     if (type === 'posts') {
       const row = await prisma.forumPost.findFirst({
@@ -644,7 +711,9 @@ export class AdminService {
       });
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
-      return prisma.forumPost.update({ where: { id }, data });
+      const updated = await prisma.forumPost.update({ where: { id }, data });
+      await invalidateForumPostListCache();
+      return updated;
     }
     if (type === 'items') {
       const row = await prisma.mallItem.findFirst({
@@ -836,10 +905,14 @@ export class AdminService {
     }
 
     if (type === 'errands') {
-      return prisma.errand.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      const result = await prisma.errand.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      await invalidateErrandListCache();
+      return result;
     }
     if (type === 'posts') {
-      return prisma.forumPost.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      const result = await prisma.forumPost.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      await invalidateForumPostListCache();
+      return result;
     }
     if (type === 'items') {
       const result = await prisma.mallItem.updateMany({
@@ -896,7 +969,14 @@ export class AdminService {
       prisma.forumPost.count({ where }),
       prisma.forumPost.findMany({ where, orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }], ...this.pageArgs(params) }),
     ]);
-    return { total, list: rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })) };
+    return {
+      total,
+      list: rows.map((row) => ({
+        ...row,
+        createdAt: row.createdAt.toISOString(),
+        validUntil: row.validUntil ? row.validUntil.toISOString() : null,
+      })),
+    };
   }
 
   private async listItems(params: { page: number; pageSize: number; keyword?: string; visibility?: 'ONLINE' | 'OFFLINE' }) {
@@ -1009,13 +1089,7 @@ export class AdminService {
   }
 
   private assertMallCategoryId(categoryIdRaw: string) {
-    const categoryId = categoryIdRaw.trim();
-    if (!categoryId) throw new HttpError(400, 'categoryId 不能为空');
-    const ok = MALL_CATEGORIES.some((c) => c.id === categoryId);
-    if (!ok) {
-      throw new HttpError(400, `categoryId 无效，可选：${MALL_CATEGORIES.map((c) => c.id).join(', ')}`);
-    }
-    return categoryId;
+    return this.mallCategories.assertEnabledCategoryId(categoryIdRaw);
   }
 
   async createContent(
@@ -1058,6 +1132,7 @@ export class AdminService {
           pinned: pin,
         },
       });
+      await invalidateErrandListCache();
       return {
         ...row,
         createdAt: row.createdAt.toISOString(),
@@ -1069,6 +1144,8 @@ export class AdminService {
     if (type === 'posts') {
       const title = (dto.title || '').trim();
       const content = (dto.content || '').trim();
+      const postType = parseForumPostType(dto.postType);
+      const validUntil = parseAnnouncementValidUntil(dto.validUntil, postType);
       const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
       const videos = parseStrictMediaUrlList(dto.videos, MAX_POST_VIDEOS, 'video', 'videos');
       if (!title) throw new HttpError(400, '请输入标题');
@@ -1090,15 +1167,22 @@ export class AdminService {
           authorAvatar: author?.avatar ?? null,
           adminLabel,
           createdByAdminId: operator.adminId,
+          postType,
+          validUntil,
           visibility: vis,
           pinned: pin,
         },
       });
-      return { ...row, createdAt: row.createdAt.toISOString() };
+      await invalidateForumPostListCache();
+      return {
+        ...row,
+        createdAt: row.createdAt.toISOString(),
+        validUntil: row.validUntil ? row.validUntil.toISOString() : null,
+      };
     }
 
     if (type === 'items') {
-      const categoryId = this.assertMallCategoryId(dto.categoryId || '');
+      const categoryId = await this.assertMallCategoryId(dto.categoryId || '');
       const title = (dto.title || '').trim();
       const desc = (dto.desc || '').trim();
       if (!title) throw new HttpError(400, '请输入标题');
@@ -1120,6 +1204,10 @@ export class AdminService {
           unit: (dto.unit?.trim() || '元').slice(0, 16),
           desc,
           contact: dto.contact?.trim() || null,
+          locationName: dto.locationName?.trim() || null,
+          locationAddress: dto.locationAddress?.trim() || null,
+          latitude: Number.isFinite(dto.latitude) ? dto.latitude : null,
+          longitude: Number.isFinite(dto.longitude) ? dto.longitude : null,
           mainImages: normalizedMainImages.length ? jsonImages(normalizedMainImages) : undefined,
           subImages: normalizedSubImages.length ? jsonImages(normalizedSubImages) : undefined,
           videos: videos.length ? jsonImages(videos) : undefined,
@@ -1200,6 +1288,8 @@ export class AdminService {
       dto.contact !== undefined ||
       dto.visibility !== undefined ||
       dto.pinned !== undefined ||
+      dto.postType !== undefined ||
+      dto.validUntil !== undefined ||
       dto.status !== undefined ||
       dto.images !== undefined ||
       dto.videos !== undefined ||
@@ -1248,7 +1338,7 @@ export class AdminService {
         data.authorName = author?.name ?? '';
       }
       const row = await prisma.errand.update({ where: { id }, data });
-      await invalidateErrandRepliesCache(id);
+      await Promise.all([invalidateErrandListCache(), invalidateErrandRepliesCache(id)]);
       return {
         ...row,
         createdAt: row.createdAt.toISOString(),
@@ -1266,6 +1356,15 @@ export class AdminService {
       if (dto.content !== undefined) data.content = dto.content.trim();
       if (dto.visibility !== undefined) data.visibility = dto.visibility;
       if (dto.pinned !== undefined) data.pinned = dto.pinned;
+      if (dto.postType !== undefined || dto.validUntil !== undefined) {
+        const nextPostType =
+          dto.postType !== undefined ? parseForumPostType(dto.postType) : (existing.postType as 'NORMAL' | 'ANNOUNCEMENT');
+        data.postType = nextPostType;
+        data.validUntil =
+          nextPostType === 'ANNOUNCEMENT'
+            ? parseAnnouncementValidUntil(dto.validUntil ?? existing.validUntil?.toISOString(), nextPostType)
+            : null;
+      }
       if (dto.images !== undefined) {
         const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
         data.images = jsonMedia(images);
@@ -1285,8 +1384,12 @@ export class AdminService {
         data.authorAvatar = author?.avatar ?? null;
       }
       const row = await prisma.forumPost.update({ where: { id }, data });
-      await invalidateForumPostRepliesCache(id);
-      return { ...row, createdAt: row.createdAt.toISOString() };
+      await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
+      return {
+        ...row,
+        createdAt: row.createdAt.toISOString(),
+        validUntil: row.validUntil ? row.validUntil.toISOString() : null,
+      };
     }
 
     if (type === 'items') {
@@ -1294,12 +1397,16 @@ export class AdminService {
       if (!existing) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
       const data: Prisma.MallItemUpdateInput = {};
-      if (dto.categoryId !== undefined) data.categoryId = this.assertMallCategoryId(dto.categoryId);
+      if (dto.categoryId !== undefined) data.categoryId = await this.assertMallCategoryId(dto.categoryId);
       if (dto.title !== undefined) data.title = dto.title.trim();
       if (dto.desc !== undefined) data.desc = dto.desc.trim();
       if (dto.price !== undefined) data.price = dto.price.trim() || null;
       if (dto.unit !== undefined) data.unit = (dto.unit.trim() || '元').slice(0, 16);
       if (dto.contact !== undefined) data.contact = dto.contact.trim() || null;
+      if (dto.locationName !== undefined) data.locationName = dto.locationName.trim() || null;
+      if (dto.locationAddress !== undefined) data.locationAddress = dto.locationAddress.trim() || null;
+      if (dto.latitude !== undefined) data.latitude = Number.isFinite(dto.latitude) ? dto.latitude : null;
+      if (dto.longitude !== undefined) data.longitude = Number.isFinite(dto.longitude) ? dto.longitude : null;
       if (dto.visibility !== undefined) data.visibility = dto.visibility;
       if (dto.pinned !== undefined) data.pinned = dto.pinned;
       if (dto.actorUserId !== undefined) {
@@ -1411,7 +1518,7 @@ export class AdminService {
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
       await prisma.errand.update({ where: { id }, data: { deletedAt: now } });
-      await invalidateErrandRepliesCache(id);
+      await Promise.all([invalidateErrandListCache(), invalidateErrandRepliesCache(id)]);
       return { id };
     }
 
@@ -1420,7 +1527,7 @@ export class AdminService {
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
       await prisma.forumPost.update({ where: { id }, data: { deletedAt: now } });
-      await invalidateForumPostRepliesCache(id);
+      await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
       return { id };
     }
 

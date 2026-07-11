@@ -11,6 +11,7 @@ datasource db {
 model User {
   id             String    @id @default(cuid())
   openid         String    @unique
+  phoneNumber    String?   @unique
   name           String?
   avatar         String?
   gender         Int       @default(2)
@@ -59,6 +60,34 @@ model AdminSystemLog {
   @@index([adminId, createdAt])
   @@index([action, createdAt])
   @@map("admin_system_logs")
+}
+
+/// 小程序接口错误日志（后台可查看，用于定位 C 端接口报错）
+model MiniProgramApiErrorLog {
+  id           String   @id @default(cuid())
+  userId       String?
+  openid       String?
+  ip           String?
+  method       String   @db.VarChar(16)
+  path         String   @db.VarChar(512)
+  url          String?  @db.Text
+  statusCode   Int?
+  errorMessage String   @db.Text
+  requestData  Json?
+  responseData Json?
+  stack        String?  @db.Text
+  platform     String?
+  appVersion   String?
+  sdkVersion   String?
+  system       String?
+  networkType  String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([method, createdAt])
+  @@index([statusCode, createdAt])
+  @@map("mini_program_api_error_logs")
 }
 
 model Task {
@@ -186,11 +215,14 @@ model ForumPost {
   adminLabel   String?
   /// 标记内容由哪个后台管理员创建（用于审计/展示）
   createdByAdminId String?
+  postType     ForumPostType @default(NORMAL)
+  validUntil   DateTime?
   visibility   ContentVisibility @default(ONLINE)
   pinned       Boolean  @default(false)
   viewCount    Int      @default(0)
   likeCount    Int      @default(0)
   replyCount   Int      @default(0)
+  shareCount   Int      @default(0)
   deletedAt    DateTime?
   createdAt    DateTime @default(now())
 
@@ -200,6 +232,7 @@ model ForumPost {
 
   @@index([pinned, createdAt])
   @@index([visibility, pinned, createdAt])
+  @@index([postType, visibility, validUntil, createdAt])
   @@index([authorId, createdAt])
   @@index([deletedAt])
   @@index([createdByAdminId])
@@ -316,6 +349,19 @@ model AppSettingTab {
 }
 
 /// 小区市场商品，对应小程序 mallAPI / api/items
+model MallCategory {
+  id        String   @id @db.VarChar(64)
+  name      String   @db.VarChar(80)
+  sortOrder Int      @default(0)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([enabled, sortOrder])
+  @@index([sortOrder])
+  @@map("mall_categories")
+}
+
 model MallItem {
   id           String   @id @default(cuid())
   categoryId   String
@@ -324,6 +370,10 @@ model MallItem {
   unit         String   @default("元")
   desc         String   @db.Text
   contact      String?
+  locationName String?
+  locationAddress String? @db.Text
+  latitude     Float?
+  longitude    Float?
   /// 主图（用于列表封面 + 详情轮播），最多 6 张（后端校验）
   mainImages   Json?
   /// 副图（用于详情轮播），与主图合计最多 6 张（后端校验）
@@ -440,6 +490,11 @@ enum AdminType {
 enum ContentVisibility {
   ONLINE
   OFFLINE
+}
+
+enum ForumPostType {
+  NORMAL
+  ANNOUNCEMENT
 }
 
 enum TaskStatus {

@@ -1,6 +1,34 @@
+import { createHash } from 'node:crypto';
 import COS from 'cos-nodejs-sdk-v5';
 import { getCredential } from 'qcloud-cos-sts';
 import { HttpError } from '../../http-error';
+
+const UPLOAD_MODULES = new Set(['forum', 'task', 'errand', 'mall', 'avatar']);
+const UPLOAD_TYPES = new Set(['img', 'vid']);
+const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif', 'avif']);
+const VIDEO_EXTS = new Set(['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm', '3gp', 'mpeg', 'mpg', 'flv']);
+
+function publicObjectUrl(bucket: string, region: string, key: string) {
+  const path = key
+    .split('/')
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join('/');
+  return `https://${bucket}.cos.${region}.myqcloud.com/${path}`;
+}
+
+function extFromFilename(filename: string) {
+  const m = /\.(\w+)$/.exec(filename || '');
+  return m ? m[1].toLowerCase() : '';
+}
+
+function extFromContentType(contentType: string) {
+  const t = String(contentType || '').toLowerCase();
+  if (t === 'image/jpeg') return 'jpg';
+  if (t === 'video/quicktime') return 'mov';
+  const m = /^(?:image|video)\/([\w.+-]+)$/.exec(t);
+  return m ? m[1].replace(/^x-/, '') : '';
+}
 
 export class UploadService {
   private mustGet(key: string) {
@@ -31,6 +59,9 @@ export class UploadService {
     const typeSeg = params.type ? `/${params.type}` : '';
     const allowPrefix = `${envPrefix}/${params.module}${typeSeg}/${params.userId}/*`;
 
+    const objectResource = `qcs::cos:${region}:uid/${appId}:${bucket}/${allowPrefix}`;
+    const bucketResource = `qcs::cos:${region}:uid/${appId}:${bucket}/*`;
+
     const policy = {
       version: '2.0',
       statement: [
@@ -43,14 +74,25 @@ export class UploadService {
             // 秒传：客户端 headObject 探测对象是否已存在，与 GetObject 同资源鉴权
             'name/cos:GetObject',
             'name/cos:InitiateMultipartUpload',
-            'name/cos:ListMultipartUploads',
             'name/cos:ListParts',
             'name/cos:UploadPart',
             'name/cos:CompleteMultipartUpload',
             'name/cos:AbortMultipartUpload',
           ],
           effect: 'allow',
-          resource: [`qcs::cos:${region}:uid/${appId}:${bucket}/${allowPrefix}`],
+          resource: [objectResource],
+        },
+        {
+          // COS SDK 会先请求 /?uploads&prefix=... 列出未完成分块上传。
+          // 这个请求按 bucket 级资源鉴权，不能只给对象前缀资源，否则会 403。
+          action: ['name/cos:ListMultipartUploads'],
+          effect: 'allow',
+          resource: [bucketResource],
+          condition: {
+            string_like: {
+              'cos:prefix': allowPrefix,
+            },
+          },
         },
       ],
     };
@@ -73,6 +115,64 @@ export class UploadService {
       startTime: r.startTime,
       expiredTime: r.expiredTime,
     };
+  }
+
+  private assertUploadScope(params: { module: string; type?: string }) {
+    const module = String(params.module || '').trim();
+    const type = String(params.type || 'img').trim();
+    if (!UPLOAD_MODULES.has(module)) throw new HttpError(400, '上传模块无效');
+    if (!UPLOAD_TYPES.has(type)) throw new HttpError(400, '上传类型无效');
+    return { module, type: type as 'img' | 'vid' };
+  }
+
+  private assertUploadFile(params: { filename: string; contentType: string; buffer: Buffer; type: 'img' | 'vid' }) {
+    if (!params.buffer.length) throw new HttpError(400, '上传文件为空');
+    const ext = extFromFilename(params.filename) || extFromContentType(params.contentType) || (params.type === 'vid' ? 'mp4' : 'jpg');
+    const allowed = params.type === 'vid' ? VIDEO_EXTS : IMAGE_EXTS;
+    if (!ext || !allowed.has(ext)) {
+      throw new HttpError(400, params.type === 'vid' ? '仅支持上传常见视频格式' : '仅支持上传常见图片格式');
+    }
+    return ext;
+  }
+
+  async uploadMedia(params: {
+    userId: string;
+    module: string;
+    type?: string;
+    filename: string;
+    filenameHint?: string;
+    contentType: string;
+    buffer: Buffer;
+  }) {
+    const secretId = this.mustGet('COS_SECRET_ID');
+    const secretKey = this.mustGet('COS_SECRET_KEY');
+    const bucket = this.mustGet('COS_BUCKET');
+    const region = this.mustGet('COS_REGION');
+    const scope = this.assertUploadScope(params);
+    const filename = extFromFilename(params.filename) ? params.filename : params.filenameHint || params.filename;
+    const ext = this.assertUploadFile({ ...params, filename, type: scope.type });
+    const allowPrefix = `${this.getEnvPrefix()}/${scope.module}/${scope.type}/${params.userId}/`;
+    const digest = createHash('md5').update(params.buffer).digest('hex');
+    const key = `${allowPrefix}${digest}.${ext}`;
+    const cos = new COS({ SecretId: secretId, SecretKey: secretKey });
+
+    await new Promise<void>((resolve, reject) => {
+      cos.putObject(
+        {
+          Bucket: bucket,
+          Region: region,
+          Key: key,
+          Body: params.buffer,
+          ContentType: params.contentType || undefined,
+        },
+        (err) => {
+          if (err) reject(err);
+          else resolve();
+        },
+      );
+    });
+
+    return { url: publicObjectUrl(bucket, region, key), key, bucket, region };
   }
 
   async presignGetObjectUrl(params: { key: string; expiresSeconds?: number }) {

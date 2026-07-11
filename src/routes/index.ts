@@ -1,7 +1,12 @@
 import Router from '@koa/router';
+import jwt from 'jsonwebtoken';
+import { parseMultipartForm } from '../lib/multipart-form';
 import { jwtAuth } from '../middleware/jwt-auth';
-import { WechatLoginDto } from '../modules/auth/auth.dto';
+import { AdminService } from '../modules/admin/admin.service';
+import { WechatLoginDto, WechatPhoneLoginDto } from '../modules/auth/auth.dto';
 import { AuthService } from '../modules/auth/auth.service';
+import { ReportMiniApiErrorLogDto } from '../modules/client-log/client-log.dto';
+import { ClientLogService } from '../modules/client-log/client-log.service';
 import {
   ClaimErrandDto,
   GetErrandsQueryDto,
@@ -11,6 +16,7 @@ import {
 } from '../modules/errand/errand.dto';
 import { ErrandService } from '../modules/errand/errand.service';
 import {
+  GetForumAnnouncementsQueryDto,
   GetForumPostsQueryDto,
   PublishForumPostDto,
   PublishForumReplyDto,
@@ -19,17 +25,22 @@ import {
 import { ForumService } from '../modules/forum/forum.service';
 import { MallService } from '../modules/mall/mall.service';
 import { SettingsService } from '../modules/settings/settings.service';
-import { CreateTaskDto, GetTasksQueryDto, SaveTaskDraftDto } from '../modules/task/task.dto';
+import {
+  ClaimTaskDto,
+  CreateTaskDto,
+  GetTasksQueryDto,
+  SaveTaskDraftDto,
+  SubmitTaskCompleteDto,
+} from '../modules/task/task.dto';
 import { TaskService } from '../modules/task/task.service';
 import { CosCredentialsDto, PresignDto } from '../modules/upload/upload.dto';
 import { UploadService } from '../modules/upload/upload.service';
 import { UpdateMeDto } from '../modules/user/user.dto';
 import { UserService } from '../modules/user/user.service';
 import { parseDto } from '../validate';
-import { jsonBody } from './json-body';
 import { registerAdminRoutes } from './admin.routes';
+import { jsonBody } from './json-body';
 import { registerMallRoutes } from './mall.routes';
-import { AdminService } from '../modules/admin/admin.service';
 
 const adminService = new AdminService();
 const authService = new AuthService();
@@ -40,6 +51,20 @@ const forumService = new ForumService();
 const uploadService = new UploadService();
 const settingsService = new SettingsService();
 const mallService = new MallService();
+const clientLogService = new ClientLogService();
+const uploadMaxBytes = Number(process.env.UPLOAD_MAX_BYTES || String(100 * 1024 * 1024));
+
+function tryGetUserFromBearer(auth?: string) {
+  if (!auth?.startsWith('Bearer ')) return {};
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return {};
+  try {
+    const payload = jwt.verify(auth.slice(7).trim(), secret) as { sub?: string; openid?: string };
+    return { userId: payload.sub, openid: payload.openid };
+  } catch {
+    return {};
+  }
+}
 
 export function createRouter() {
   const router = new Router();
@@ -48,11 +73,29 @@ export function createRouter() {
     ctx.body = { ok: true };
   });
 
-  registerAdminRoutes(router, adminService, settingsService);
+  registerAdminRoutes(router, adminService, settingsService, clientLogService);
+
+  router.post('/api/logs/mini-api-errors', async (ctx) => {
+    const dto = await parseDto(ReportMiniApiErrorLogDto, jsonBody(ctx));
+    const user = tryGetUserFromBearer(ctx.headers.authorization);
+    ctx.body = {
+      code: 200,
+      data: await clientLogService.reportMiniApiErrorLog({
+        ...user,
+        ip: ctx.ip,
+        dto,
+      }),
+    };
+  });
 
   router.post('/api/auth/wechat/login', async (ctx) => {
     const dto = await parseDto(WechatLoginDto, jsonBody(ctx));
-    ctx.body = await authService.wechatLogin(dto.code);
+    ctx.body = await authService.wechatLogin(dto);
+  });
+
+  router.post('/api/auth/wechat/phone-login', async (ctx) => {
+    const dto = await parseDto(WechatPhoneLoginDto, jsonBody(ctx));
+    ctx.body = await authService.wechatPhoneLogin(dto);
   });
 
   router.get('/api/user/me', jwtAuth, async (ctx) => {
@@ -91,6 +134,13 @@ export function createRouter() {
   router.get('/api/posts/my-favorites', jwtAuth, async (ctx) => {
     const userId = ctx.state.user!.userId;
     const data = await forumService.getMyFavoritePosts({ userId });
+    ctx.body = { code: 200, data };
+  });
+
+  router.get('/api/posts/announcements', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const q = await parseDto(GetForumAnnouncementsQueryDto, ctx.query);
+    const data = await forumService.listAnnouncements({ userId, limit: q.limit });
     ctx.body = { code: 200, data };
   });
 
@@ -208,6 +258,11 @@ export function createRouter() {
     ctx.body = { code: 200, data: await forumService.unfavorite({ userId, postId }) };
   });
 
+  router.post('/api/posts/:postId/share', jwtAuth, async (ctx) => {
+    const postId = String((ctx.params as { postId?: string }).postId || '').trim();
+    ctx.body = { code: 200, data: await forumService.share({ postId }) };
+  });
+
   // 跑腿列表
   router.get('/api/errands', jwtAuth, async (ctx) => {
     const userId = ctx.state.user!.userId;
@@ -303,7 +358,7 @@ export function createRouter() {
     ctx.body = { code: 200, data: await errandService.unfavorite({ userId, errandId }) };
   });
 
-  router.get('/api/tasks', jwtAuth, async (ctx) => {
+  router.get('/api/tasks', async (ctx) => {
     const q = await parseDto(GetTasksQueryDto, ctx.query);
     const page = q.page ?? 1;
     const pageSize = q.pageSize ?? 50;
@@ -316,7 +371,7 @@ export function createRouter() {
   });
 
   // 兼容：部分客户端更喜欢用 POST 拉列表（body 传参）
-  router.post('/api/tasks/list', jwtAuth, async (ctx) => {
+  router.post('/api/tasks/list', async (ctx) => {
     const q = await parseDto(GetTasksQueryDto, jsonBody(ctx));
     const page = q.page ?? 1;
     const pageSize = q.pageSize ?? 50;
@@ -328,9 +383,47 @@ export function createRouter() {
     ctx.body = { code: 200, data };
   });
 
-  router.get('/api/tasks/:taskId', jwtAuth, async (ctx) => {
+  router.get('/api/tasks/my', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const type = String((ctx.query as { type?: string }).type || 'published').trim();
+    const data = await taskService.getMyTasks({ userId, type });
+    ctx.body = { code: 200, data };
+  });
+
+  router.get('/api/tasks/:taskId', async (ctx) => {
     const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
     const data = await taskService.getTaskDetail(taskId);
+    ctx.body = { code: 200, data };
+  });
+
+  // 领取任务
+  router.post('/api/tasks/:taskId/claim', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
+    const dto = await parseDto(ClaimTaskDto, jsonBody(ctx));
+    const data = await taskService.claimTask({ taskId, userId, takerName: dto.takerName });
+    ctx.body = { code: 200, data };
+  });
+
+  // 接单人提交完成说明
+  router.post('/api/tasks/:taskId/submit-complete', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
+    const dto = await parseDto(SubmitTaskCompleteDto, jsonBody(ctx));
+    const data = await taskService.submitComplete({
+      taskId,
+      userId,
+      proofText: dto.proofText,
+      proofImages: dto.proofImages,
+    });
+    ctx.body = { code: 200, data };
+  });
+
+  // 发布者确认任务完成
+  router.post('/api/tasks/:taskId/confirm-complete', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
+    const data = await taskService.confirmComplete({ taskId, userId });
     ctx.body = { code: 200, data };
   });
 
@@ -415,12 +508,34 @@ export function createRouter() {
     });
   });
 
+  router.post('/api/upload/media', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const form = await parseMultipartForm(ctx.req, ctx.headers['content-type'] || '', {
+      maxBytes: uploadMaxBytes,
+    });
+    const file = form.files.find((x) => x.fieldName === 'file') || form.files[0];
+    if (!file) {
+      ctx.status = 400;
+      ctx.body = { statusCode: 400, message: '缺少上传文件' };
+      return;
+    }
+    ctx.body = await uploadService.uploadMedia({
+      userId,
+      module: form.fields.module,
+      type: form.fields.type,
+      filename: file.filename,
+      filenameHint: form.fields.filenameHint,
+      contentType: file.contentType,
+      buffer: file.buffer,
+    });
+  });
+
   router.get('/api/files/presign', jwtAuth, async (ctx) => {
     const q = await parseDto(PresignDto, ctx.query);
     ctx.body = await uploadService.presignGetObjectUrl({ key: q.key });
   });
 
-  router.get('/api/app-settings/module-entry-tabs', jwtAuth, async (ctx) => {
+  router.get('/api/app-settings/module-entry-tabs', async (ctx) => {
     const data = await settingsService.getModuleEntryTabs();
     ctx.body = { code: 200, data };
   });

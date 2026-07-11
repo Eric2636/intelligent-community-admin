@@ -6,6 +6,12 @@ export const SETTINGS_MODULE_TABS_TTL_SEC = 300;
 const TASK_PENDING_VER_KEY = 'ic:v1:task:pending-list:ver';
 export const TASK_PENDING_LIST_TTL_SEC = 120;
 
+const FORUM_POST_LIST_VER_KEY = 'ic:v1:forum:posts:ver';
+export const FORUM_POST_LIST_TTL_SEC = 120;
+
+const ERRAND_LIST_VER_KEY = 'ic:v1:errand:list:ver';
+export const ERRAND_LIST_TTL_SEC = 120;
+
 let client: Redis | null = null;
 let clientInit = false;
 
@@ -114,6 +120,38 @@ export async function invalidatePendingTasksListCache(): Promise<void> {
   }
 }
 
+async function getForumPostListVersion(): Promise<string> {
+  const r = getRedis();
+  if (!r) return '0';
+  try {
+    return (await r.get(FORUM_POST_LIST_VER_KEY)) ?? '0';
+  } catch {
+    return '0';
+  }
+}
+
+export async function forumPostListCacheKey(
+  page: number,
+  pageSize: number,
+  keyword: string,
+  orderBy: string,
+): Promise<string> {
+  const ver = await getForumPostListVersion();
+  const kw = (keyword || '').trim();
+  const ord = orderBy || 'time';
+  return `ic:v1:forum:posts:${ver}:${page}:${pageSize}:${ord}:${encodeURIComponent(kw)}`;
+}
+
+export async function invalidateForumPostListCache(): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    await r.incr(FORUM_POST_LIST_VER_KEY);
+  } catch (e) {
+    console.warn('[redis] incr forum list ver', e);
+  }
+}
+
 function forumPostRepliesVerKey(postId: string): string {
   return `ic:v1:forum:post:${postId}:replies-ver`;
 }
@@ -142,6 +180,38 @@ export async function invalidateForumPostRepliesCache(postId: string): Promise<v
     await r.incr(forumPostRepliesVerKey(id));
   } catch (e) {
     console.warn('[redis] forum post replies ver', e);
+  }
+}
+
+async function getErrandListVersion(): Promise<string> {
+  const r = getRedis();
+  if (!r) return '0';
+  try {
+    return (await r.get(ERRAND_LIST_VER_KEY)) ?? '0';
+  } catch {
+    return '0';
+  }
+}
+
+export async function errandListCacheKey(
+  page: number,
+  pageSize: number,
+  keyword: string,
+  orderBy: string,
+): Promise<string> {
+  const ver = await getErrandListVersion();
+  const kw = (keyword || '').trim();
+  const ord = orderBy || 'time';
+  return `ic:v1:errand:list:${ver}:${page}:${pageSize}:${ord}:${encodeURIComponent(kw)}`;
+}
+
+export async function invalidateErrandListCache(): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    await r.incr(ERRAND_LIST_VER_KEY);
+  } catch (e) {
+    console.warn('[redis] incr errand list ver', e);
   }
 }
 

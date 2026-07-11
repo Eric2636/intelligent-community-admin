@@ -1,4 +1,5 @@
 import Router from '@koa/router';
+import { parseMultipartForm } from '../lib/multipart-form';
 import { adminAuth, requireSuperAdmin } from '../middleware/admin-auth';
 import {
   AdminContentQueryDto,
@@ -9,18 +10,28 @@ import {
   AdminSystemLogQueryDto,
   AdminUpdateContentDto,
   BatchUpdateContentStateDto,
+  CreateMallCategoryDto,
   CreateAdminUserDto,
+  UpdateMallCategoryDto,
   UpdateAdminUserDto,
   UpdateContentStateDto,
   UpdateUserEnabledDto,
 } from '../modules/admin/admin.dto';
 import { AdminService } from '../modules/admin/admin.service';
+import { MiniApiErrorLogQueryDto } from '../modules/client-log/client-log.dto';
+import { ClientLogService } from '../modules/client-log/client-log.service';
+import { MallCategoryService } from '../modules/mall/mall-category.service';
 import { UpdateModuleTabEnabledDto } from '../modules/settings/settings.dto';
 import { SettingsService } from '../modules/settings/settings.service';
+import { CosCredentialsDto } from '../modules/upload/upload.dto';
+import { UploadService } from '../modules/upload/upload.service';
 import { parseDto } from '../validate';
 import { jsonBody } from './json-body';
 
 const contentTypes = new Set(['errands', 'posts', 'items', 'tasks']);
+const uploadService = new UploadService();
+const mallCategoryService = new MallCategoryService();
+const uploadMaxBytes = Number(process.env.UPLOAD_MAX_BYTES || String(100 * 1024 * 1024));
 
 function pageOf(q: { page?: number; pageSize?: number }) {
   return {
@@ -33,6 +44,7 @@ export function registerAdminRoutes(
   router: Router,
   adminService: AdminService,
   settingsService: SettingsService,
+  clientLogService: ClientLogService,
 ) {
   router.get('/api/admin/auth/captcha', async (ctx) => {
     const data = await adminService.createLoginCaptcha();
@@ -57,6 +69,11 @@ export function registerAdminRoutes(
     ctx.body = { code: 200, data: res.data };
   });
 
+  router.post('/api/admin/auth/refresh', async (ctx) => {
+    const body = jsonBody(ctx) as { refreshToken?: string };
+    ctx.body = { code: 200, data: await adminService.refreshToken(body.refreshToken || '') };
+  });
+
   router.get('/api/admin/auth/me', adminAuth, async (ctx) => {
     ctx.body = { code: 200, data: await adminService.getMe(ctx.state.admin.adminId) };
   });
@@ -72,6 +89,20 @@ export function registerAdminRoutes(
     ctx.body = {
       code: 200,
       data: await adminService.listSystemLogs({ ...pageOf(q), keyword: q.keyword, action: q.action }),
+    };
+  });
+
+  router.get('/api/admin/mini-api-error-logs', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const q = await parseDto(MiniApiErrorLogQueryDto, ctx.query);
+    ctx.body = {
+      code: 200,
+      data: await clientLogService.listMiniApiErrorLogs({
+        ...pageOf(q),
+        keyword: q.keyword,
+        method: q.method,
+        statusCode: q.statusCode,
+      }),
     };
   });
 
@@ -117,7 +148,7 @@ export function registerAdminRoutes(
 
   router.get('/api/admin/users-mini', adminAuth, async (ctx) => {
     if (!requireSuperAdmin(ctx)) return;
-    const idsRaw = String((ctx.query as any)?.ids || '').trim();
+    const idsRaw = String((ctx.query as { ids?: string })?.ids || '').trim();
     const ids = idsRaw ? idsRaw.split(',').map((x) => x.trim()).filter(Boolean) : [];
     ctx.body = { code: 200, data: await adminService.listUsersMiniByIds({ ids }) };
   });
@@ -219,6 +250,29 @@ export function registerAdminRoutes(
       detail: { adminId },
     });
     ctx.body = { code: 200, data: await adminService.superAdminUnlockAdminLogin(adminId) };
+  });
+
+  router.get('/api/admin/mall-categories', adminAuth, async (ctx) => {
+    ctx.body = { code: 200, data: await mallCategoryService.listCategories({ includeDisabled: true }) };
+  });
+
+  router.post('/api/admin/mall-categories', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const dto = await parseDto(CreateMallCategoryDto, jsonBody(ctx));
+    ctx.body = { code: 200, data: await mallCategoryService.createCategory(dto) };
+  });
+
+  router.patch('/api/admin/mall-categories/:id', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const id = String((ctx.params as { id?: string }).id || '').trim();
+    const dto = await parseDto(UpdateMallCategoryDto, jsonBody(ctx));
+    ctx.body = { code: 200, data: await mallCategoryService.updateCategory(id, dto) };
+  });
+
+  router.delete('/api/admin/mall-categories/:id', adminAuth, async (ctx) => {
+    if (!requireSuperAdmin(ctx)) return;
+    const id = String((ctx.params as { id?: string }).id || '').trim();
+    ctx.body = { code: 200, data: await mallCategoryService.deleteCategory(id) };
   });
 
   router.get('/api/admin/contents/:type', adminAuth, async (ctx) => {
@@ -354,6 +408,41 @@ export function registerAdminRoutes(
         },
         ctx.state.admin,
       ),
+    };
+  });
+
+  router.post('/api/admin/upload/cos/credentials', adminAuth, async (ctx) => {
+    const dto = await parseDto(CosCredentialsDto, jsonBody(ctx));
+    ctx.body = {
+      code: 200,
+      data: await uploadService.getStsCredentials({
+        userId: ctx.state.admin.adminId,
+        module: dto.module,
+        type: dto.type,
+      }),
+    };
+  });
+
+  router.post('/api/admin/upload/media', adminAuth, async (ctx) => {
+    const form = await parseMultipartForm(ctx.req, ctx.headers['content-type'] || '', {
+      maxBytes: uploadMaxBytes,
+    });
+    const file = form.files.find((x) => x.fieldName === 'file') || form.files[0];
+    if (!file) {
+      ctx.status = 400;
+      ctx.body = { statusCode: 400, message: '缺少上传文件' };
+      return;
+    }
+    ctx.body = {
+      code: 200,
+      data: await uploadService.uploadMedia({
+        userId: ctx.state.admin.adminId,
+        module: form.fields.module,
+        type: form.fields.type,
+        filename: file.filename,
+        contentType: file.contentType,
+        buffer: file.buffer,
+      }),
     };
   });
 

@@ -31,7 +31,13 @@ export async function adminAuth(ctx: Koa.Context, next: Koa.Next) {
       sub: string;
       username: string;
       role: 'ADMIN' | 'SUPERADMIN';
+      typ?: 'access' | 'refresh';
     };
+    if (payload.typ && payload.typ !== 'access') {
+      ctx.status = 401;
+      ctx.body = { statusCode: 401, message: 'Unauthorized', reason: 'token_invalid' };
+      return;
+    }
     ctx.state.admin = {
       adminId: payload.sub,
       username: payload.username,

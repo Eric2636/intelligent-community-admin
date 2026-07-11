@@ -6,7 +6,10 @@ import { prisma } from '../../lib/prisma';
 import {
   cacheAsideJson,
   FORUM_POST_REPLIES_TTL_SEC,
+  FORUM_POST_LIST_TTL_SEC,
+  forumPostListCacheKey,
   forumPostRepliesDataCacheKey,
+  invalidateForumPostListCache,
   invalidateForumPostRepliesCache,
 } from '../../lib/redis-cache';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
@@ -34,6 +37,13 @@ export class ForumService {
     }));
   }
 
+  private reviveForumPostRows<T extends { createdAt: Date }>(rows: T[]): T[] {
+    return rows.map((r) => ({
+      ...r,
+      createdAt: r.createdAt instanceof Date ? r.createdAt : new Date(r.createdAt as unknown as string),
+    }));
+  }
+
   async listPosts(params: {
     userId: string;
     page: number;
@@ -47,7 +57,12 @@ export class ForumService {
     const k = keyword && keyword.trim() ? keyword.trim() : '';
     const textFilter: Prisma.ForumPostWhereInput = k ? { title: { contains: k } } : {};
 
-    const visibleWhere: Prisma.ForumPostWhereInput = { visibility: 'ONLINE', ...contentNotDeleted, ...textFilter };
+    const visibleWhere: Prisma.ForumPostWhereInput = {
+      visibility: 'ONLINE',
+      postType: 'NORMAL',
+      ...contentNotDeleted,
+      ...textFilter,
+    };
     const pinnedWhere: Prisma.ForumPostWhereInput = { pinned: true, ...visibleWhere };
     const listWhere: Prisma.ForumPostWhereInput = { pinned: false, ...visibleWhere };
 
@@ -56,19 +71,27 @@ export class ForumService {
         ? [{ replyCount: 'desc' as const }, { createdAt: 'desc' as const }]
         : [{ createdAt: 'desc' as const }];
 
-    const [pinnedRows, total, listRows] = await Promise.all([
-      prisma.forumPost.findMany({
-        where: pinnedWhere,
-        orderBy: [{ createdAt: 'desc' }],
-      }),
-      prisma.forumPost.count({ where: listWhere }),
-      prisma.forumPost.findMany({
-        where: listWhere,
-        orderBy,
-        skip,
-        take: pageSize,
-      }),
-    ]);
+    const cacheKey = await forumPostListCacheKey(page, pageSize, k, params.orderBy || 'time');
+    const cached = await cacheAsideJson(cacheKey, FORUM_POST_LIST_TTL_SEC, async () => {
+      const [pinnedRows, total, listRows] = await Promise.all([
+        prisma.forumPost.findMany({
+          where: pinnedWhere,
+          orderBy: [{ createdAt: 'desc' }],
+        }),
+        prisma.forumPost.count({ where: listWhere }),
+        prisma.forumPost.findMany({
+          where: listWhere,
+          orderBy,
+          skip,
+          take: pageSize,
+        }),
+      ]);
+      return { pinnedRows, total, listRows };
+    });
+
+    const pinnedRows = this.reviveForumPostRows(cached.pinnedRows);
+    const listRows = this.reviveForumPostRows(cached.listRows);
+    const total = cached.total;
 
     const uniqueIds = [...new Set([...pinnedRows, ...listRows].map((r) => r.id))];
     const [liked, favorited] =
@@ -94,6 +117,37 @@ export class ForumService {
       list: listRows.map(mapOne),
       total,
     };
+  }
+
+  async listAnnouncements(params: { userId: string; limit?: number }) {
+    const limit = Math.min(Math.max(Number(params.limit || 5), 1), 10);
+    const rows = await prisma.forumPost.findMany({
+      where: {
+        visibility: 'ONLINE',
+        postType: 'ANNOUNCEMENT',
+        validUntil: { gt: new Date() },
+        ...contentNotDeleted,
+      },
+      orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
+      take: limit,
+    });
+    if (rows.length === 0) return [];
+
+    const ids = rows.map((r) => r.id);
+    const [liked, favorited] = await Promise.all([
+      prisma.forumPostLike.findMany({
+        where: { userId: params.userId, postId: { in: ids } },
+        select: { postId: true },
+      }),
+      prisma.forumPostFavorite.findMany({
+        where: { userId: params.userId, postId: { in: ids } },
+        select: { postId: true },
+      }),
+    ]);
+    const likedSet = new Set(liked.map((x) => x.postId));
+    const favSet = new Set(favorited.map((x) => x.postId));
+
+    return rows.map((p) => this.mapPostListItem(p, params.userId, likedSet.has(p.id), favSet.has(p.id)));
   }
 
   async getPostDetail(params: { userId: string; postId: string }) {
@@ -144,7 +198,7 @@ export class ForumService {
     if (post.authorId !== params.userId) throw new HttpError(403, '仅能删除自己的帖子');
 
     await prisma.forumPost.update({ where: { id }, data: { deletedAt: new Date() } });
-    await invalidateForumPostRepliesCache(id);
+    await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
     return {};
   }
 
@@ -196,6 +250,7 @@ export class ForumService {
         authorAvatar: authorAvatar || null,
       },
     });
+    await invalidateForumPostListCache();
     return this.mapPostDetail(row, params.userId, false, false);
   }
 
@@ -243,7 +298,7 @@ export class ForumService {
       }
     }
 
-    const { name: authorName } = await this.getUserDisplayName(params.userId);
+    const { name: authorName, avatar: authorAvatar } = await this.getUserDisplayName(params.userId);
     const row = await prisma.$transaction(async (tx) => {
       const r = await tx.forumReply.create({
         data: {
@@ -261,7 +316,7 @@ export class ForumService {
       return r;
     });
 
-    await invalidateForumPostRepliesCache(id);
+    await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
 
     return {
       _id: row.id,
@@ -271,6 +326,7 @@ export class ForumService {
       replyToAuthorName: row.replyToAuthorName,
       authorId: row.authorId,
       authorName: row.authorName ?? '',
+      authorAvatar,
       isAuthor: true,
       content: row.content,
       images: Array.isArray(row.images) ? row.images : row.images ?? [],
@@ -413,6 +469,24 @@ export class ForumService {
     return this.getReplyReactionSnapshot(replyId, params.userId);
   }
 
+  async share(params: { postId: string }) {
+    const id = String(params.postId || '').trim();
+    if (!id) throw new HttpError(400, 'postId 不能为空');
+    const post = await prisma.forumPost.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      select: { id: true },
+    });
+    if (!post) throw new HttpError(404, '帖子不存在');
+
+    const updated = await prisma.forumPost.update({
+      where: { id },
+      data: { shareCount: { increment: 1 } },
+      select: { shareCount: true },
+    });
+    await invalidateForumPostListCache();
+    return { shareCount: updated.shareCount };
+  }
+
   async like(params: { userId: string; postId: string }) {
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
@@ -424,9 +498,11 @@ export class ForumService {
     try {
       await prisma.forumPostLike.create({ data: { postId: id, userId: params.userId } });
       const updated = await prisma.forumPost.update({ where: { id }, data: { likeCount: { increment: 1 } } });
+      await invalidateForumPostListCache();
       return { liked: true, likeCount: updated.likeCount };
     } catch {
       const row = await prisma.forumPost.findUnique({ where: { id }, select: { likeCount: true } });
+      await invalidateForumPostListCache();
       return { liked: true, likeCount: row?.likeCount ?? 0 };
     }
   }
@@ -445,9 +521,11 @@ export class ForumService {
         where: { id },
         data: { likeCount: { decrement: 1 } },
       });
+      await invalidateForumPostListCache();
       return { liked: false, likeCount: Math.max(0, updated.likeCount) };
     } catch {
       const row = await prisma.forumPost.findUnique({ where: { id }, select: { likeCount: true } });
+      await invalidateForumPostListCache();
       return { liked: false, likeCount: row?.likeCount ?? 0 };
     }
   }
@@ -486,7 +564,7 @@ export class ForumService {
 
   async getMyPosts(params: { userId: string }) {
     const rows = await prisma.forumPost.findMany({
-      where: { authorId: params.userId, visibility: 'ONLINE', ...contentNotDeleted },
+      where: { authorId: params.userId, visibility: 'ONLINE', postType: 'NORMAL', ...contentNotDeleted },
       orderBy: { createdAt: 'desc' },
     });
     const ids = rows.map((r) => r.id);
@@ -538,7 +616,8 @@ export class ForumService {
   ) {
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
-    const [likes, favs, userReactions, reactionAgg] = await Promise.all([
+    const authorIds = [...new Set(rows.map((r) => r.authorId).filter(Boolean))];
+    const [likes, favs, userReactions, reactionAgg, users] = await Promise.all([
       prisma.forumReplyLike.findMany({
         where: { userId, replyId: { in: ids } },
         select: { replyId: true },
@@ -556,10 +635,15 @@ export class ForumService {
         where: { replyId: { in: ids } },
         _count: { _all: true },
       }),
+      prisma.user.findMany({
+        where: { id: { in: authorIds } },
+        select: { id: true, avatar: true },
+      }),
     ]);
     const likedSet = new Set(likes.map((x) => x.replyId));
     const favSet = new Set(favs.map((x) => x.replyId));
     const myReactMap = new Map(userReactions.map((x) => [x.replyId, x.emoji]));
+    const userAvatarMap = new Map(users.map((x) => [x.id, x.avatar ?? '']));
     const countMap = new Map<string, Record<string, number>>();
     for (const g of reactionAgg) {
       if (!countMap.has(g.replyId)) countMap.set(g.replyId, {});
@@ -574,6 +658,7 @@ export class ForumService {
       replyToAuthorName: r.replyToAuthorName,
       authorId: r.authorId,
       authorName: r.authorName ?? '',
+      authorAvatar: userAvatarMap.get(r.authorId) ?? '',
       isAuthor: r.authorId === userId,
       content: r.content,
       images: Array.isArray(r.images) ? r.images : r.images ?? [],
@@ -629,7 +714,12 @@ export class ForumService {
 
     const ids = favs.map((f) => f.postId);
     const posts = await prisma.forumPost.findMany({
-      where: { id: { in: ids }, visibility: 'ONLINE', ...contentNotDeleted },
+      where: {
+        id: { in: ids },
+        visibility: 'ONLINE',
+        ...contentNotDeleted,
+        OR: [{ postType: 'NORMAL' }, { postType: 'ANNOUNCEMENT', validUntil: { gt: new Date() } }],
+      },
     });
     const map = new Map(posts.map((p) => [p.id, p]));
 
@@ -654,9 +744,13 @@ export class ForumService {
       videos: unknown;
       authorId: string;
       authorName: string | null;
+      authorAvatar?: string | null;
       adminLabel?: string | null;
+      postType?: string | null;
+      validUntil?: Date | null;
       pinned?: boolean;
       viewCount?: number;
+      shareCount?: number;
       likeCount: number;
       replyCount: number;
       createdAt: Date;
@@ -677,8 +771,13 @@ export class ForumService {
       pinned: Boolean(p.pinned),
       authorId: p.authorId,
       authorName: p.authorName ?? '',
+      authorAvatar: p.authorAvatar ?? '',
       adminLabel: p.adminLabel ?? '',
+      postType: p.postType ?? 'NORMAL',
+      validUntil: p.validUntil ? p.validUntil.toISOString() : '',
       viewCount: p.viewCount ?? 0,
+      shareCount: p.shareCount ?? 0,
+      forwardCount: p.shareCount ?? 0,
       likeCount: p.likeCount ?? 0,
       replyCount: p.replyCount ?? 0,
       isLiked,
@@ -699,8 +798,11 @@ export class ForumService {
       authorId: string;
       authorName: string | null;
       authorAvatar?: string | null;
+      postType?: string | null;
+      validUntil?: Date | null;
       pinned?: boolean;
       viewCount?: number;
+      shareCount?: number;
       likeCount: number;
       replyCount: number;
       createdAt: Date;

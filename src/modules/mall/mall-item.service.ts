@@ -11,13 +11,12 @@ import {
   MALL_ITEM_DETAIL_TTL_SEC,
   MALL_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
-import { MALL_CATEGORIES, MALL_LIST_CAP } from './mall.constants';
+import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
+import { MallCategoryService } from './mall-category.service';
 import { jsonImages, parsePriceNum, serializeMallItem } from './mall.serialize';
 
 export class MallItemService {
-  listCategories() {
-    return MALL_CATEGORIES;
-  }
+  private readonly categories = new MallCategoryService();
 
   async listItems(params: {
     categoryId?: string;
@@ -58,10 +57,13 @@ export class MallItemService {
     if (!id) throw new HttpError(400, '商品 id 不能为空');
 
     const base = await cacheAsideJson(mallItemDetailCacheKey(id), MALL_ITEM_DETAIL_TTL_SEC, async () => {
-      const row = await prisma.mallItem.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+      const row = await prisma.mallItem.findFirst({ where: { id, ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '商品不存在');
       return serializeMallItem(row);
     });
+    if (base.visibility !== 'ONLINE' && base.publisherId !== params.userId) {
+      throw new HttpError(404, '商品不存在');
+    }
 
     const fav = await prisma.mallItemFavorite.findUnique({
       where: { itemId_userId: { itemId: id, userId: params.userId } },
@@ -78,6 +80,10 @@ export class MallItemService {
     unit?: string;
     desc: string;
     contact?: string;
+    locationName?: string;
+    locationAddress?: string;
+    latitude?: number;
+    longitude?: number;
     mainImages?: string[];
     subImages?: string[];
     videos?: string[];
@@ -97,17 +103,22 @@ export class MallItemService {
 
     const row = await prisma.mallItem.create({
       data: {
-        categoryId: params.categoryId.trim(),
+        categoryId: await this.categories.assertEnabledCategoryId(params.categoryId),
         title: params.title.trim(),
         price: params.price?.trim() || null,
         unit: (params.unit?.trim() || '元').slice(0, 16),
         desc: params.desc.trim(),
         contact: params.contact?.trim() || null,
+        locationName: params.locationName?.trim() || null,
+        locationAddress: params.locationAddress?.trim() || null,
+        latitude: Number.isFinite(params.latitude) ? params.latitude : null,
+        longitude: Number.isFinite(params.longitude) ? params.longitude : null,
         mainImages: normalizedMainImages.length ? jsonImages(normalizedMainImages) : undefined,
         subImages: normalizedSubImages.length ? jsonImages(normalizedSubImages) : undefined,
         videos: videos.length ? jsonImages(videos) : undefined,
         images: legacyImages.length ? jsonImages(legacyImages) : undefined,
         publisherId: params.userId,
+        visibility: MALL_DEFAULT_VISIBILITY,
       },
     });
     const s = serializeMallItem(row);
@@ -117,7 +128,7 @@ export class MallItemService {
 
   async getMyItems(params: { userId: string }) {
     const rows = await prisma.mallItem.findMany({
-      where: { publisherId: params.userId, visibility: 'ONLINE', ...contentNotDeleted },
+      where: { publisherId: params.userId, ...contentNotDeleted },
       orderBy: { createdAt: 'desc' },
     });
     return rows.map((r) => serializeMallItem(r));

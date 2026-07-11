@@ -349,6 +349,19 @@ model AppSettingTab {
 }
 
 /// 小区市场商品，对应小程序 mallAPI / api/items
+model MallCategory {
+  id        String   @id @db.VarChar(64)
+  name      String   @db.VarChar(80)
+  sortOrder Int      @default(0)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([enabled, sortOrder])
+  @@index([sortOrder])
+  @@map("mall_categories")
+}
+
 model MallItem {
   id           String   @id @default(cuid())
   categoryId   String

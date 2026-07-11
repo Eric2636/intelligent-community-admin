@@ -18,7 +18,7 @@ import {
 import { getRedisClient } from '../../lib/redis-cache';
 import type { AdminCreateContentDto, AdminUpdateContentDto } from './admin.dto';
 import { MallCommentService } from '../mall/mall-comment.service';
-import { MALL_CATEGORIES } from '../mall/mall.constants';
+import { MallCategoryService } from '../mall/mall-category.service';
 import { jsonImages } from '../mall/mall.serialize';
 import {
   createCaptcha,
@@ -130,6 +130,7 @@ function parseAnnouncementValidUntil(raw: string | undefined, postType: 'NORMAL'
 
 export class AdminService {
   private readonly mallComments = new MallCommentService();
+  private readonly mallCategories = new MallCategoryService();
 
   async writeSystemLog(params: {
     adminId: string;
@@ -1088,13 +1089,7 @@ export class AdminService {
   }
 
   private assertMallCategoryId(categoryIdRaw: string) {
-    const categoryId = categoryIdRaw.trim();
-    if (!categoryId) throw new HttpError(400, 'categoryId 不能为空');
-    const ok = MALL_CATEGORIES.some((c) => c.id === categoryId);
-    if (!ok) {
-      throw new HttpError(400, `categoryId 无效，可选：${MALL_CATEGORIES.map((c) => c.id).join(', ')}`);
-    }
-    return categoryId;
+    return this.mallCategories.assertEnabledCategoryId(categoryIdRaw);
   }
 
   async createContent(
@@ -1187,7 +1182,7 @@ export class AdminService {
     }
 
     if (type === 'items') {
-      const categoryId = this.assertMallCategoryId(dto.categoryId || '');
+      const categoryId = await this.assertMallCategoryId(dto.categoryId || '');
       const title = (dto.title || '').trim();
       const desc = (dto.desc || '').trim();
       if (!title) throw new HttpError(400, '请输入标题');
@@ -1402,7 +1397,7 @@ export class AdminService {
       if (!existing) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
       const data: Prisma.MallItemUpdateInput = {};
-      if (dto.categoryId !== undefined) data.categoryId = this.assertMallCategoryId(dto.categoryId);
+      if (dto.categoryId !== undefined) data.categoryId = await this.assertMallCategoryId(dto.categoryId);
       if (dto.title !== undefined) data.title = dto.title.trim();
       if (dto.desc !== undefined) data.desc = dto.desc.trim();
       if (dto.price !== undefined) data.price = dto.price.trim() || null;

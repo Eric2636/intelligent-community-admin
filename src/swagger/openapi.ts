@@ -151,13 +151,13 @@ export const openApiDocument: Record<string, unknown> = {
       },
       PublishMallItemBody: {
         type: 'object',
-        required: ['categoryId', 'title', 'desc'],
+        required: ['categoryId', 'title'],
         properties: {
           categoryId: { type: 'string', minLength: 1, maxLength: 200 },
           title: { type: 'string', minLength: 1, maxLength: 200 },
           price: { type: 'string', maxLength: 64 },
           unit: { type: 'string', maxLength: 16 },
-          desc: { type: 'string', minLength: 1, maxLength: 8000 },
+          desc: { type: 'string', maxLength: 8000 },
           contact: { type: 'string', maxLength: 500 },
           mainImages: { type: 'array', maxItems: 1, items: { type: 'string' }, description: '列表主图，仅 1 张' },
           subImages: { type: 'array', items: { type: 'string' } },

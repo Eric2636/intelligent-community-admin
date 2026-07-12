@@ -36,10 +36,10 @@ export class PublishMallItemDto {
   @MaxLength(16)
   unit?: string;
 
+  @IsOptional()
   @IsString()
-  @MinLength(1)
   @MaxLength(8000)
-  desc!: string;
+  desc?: string;
 
   @IsOptional()
   @IsString()

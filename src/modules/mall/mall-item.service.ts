@@ -11,8 +11,8 @@ import {
   MALL_ITEM_DETAIL_TTL_SEC,
   MALL_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
-import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
 import { MallCategoryService } from './mall-category.service';
+import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
 import { jsonImages, parsePriceNum, serializeMallItem } from './mall.serialize';
 
 export class MallItemService {
@@ -78,7 +78,7 @@ export class MallItemService {
     title: string;
     price?: string;
     unit?: string;
-    desc: string;
+    desc?: string;
     contact?: string;
     locationName?: string;
     locationAddress?: string;
@@ -107,7 +107,7 @@ export class MallItemService {
         title: params.title.trim(),
         price: params.price?.trim() || null,
         unit: (params.unit?.trim() || '元').slice(0, 16),
-        desc: params.desc.trim(),
+        desc: params.desc?.trim() || '',
         contact: params.contact?.trim() || null,
         locationName: params.locationName?.trim() || null,
         locationAddress: params.locationAddress?.trim() || null,

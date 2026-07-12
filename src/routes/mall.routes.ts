@@ -1,5 +1,6 @@
 import Router from '@koa/router';
 import { jwtAuth } from '../middleware/jwt-auth';
+import { CreateMallItemCommentDto } from '../modules/mall/mall-comment.dto';
 import {
   CreateMallOrderDto,
   GetMallItemsQueryDto,
@@ -9,7 +10,6 @@ import {
 import { MallService } from '../modules/mall/mall.service';
 import { parseDto } from '../validate';
 import { jsonBody } from './json-body';
-import { CreateMallItemCommentDto } from '../modules/mall/mall-comment.dto';
 
 export function registerMallRoutes(router: Router, mallService: MallService) {
   router.get('/api/categories', jwtAuth, async (ctx) => {

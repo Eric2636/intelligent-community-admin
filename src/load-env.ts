@@ -4,21 +4,29 @@ import { config as loadDotenv } from 'dotenv';
 
 const root = resolve(__dirname, '..');
 
-export type AppEnvProfile = 'development' | 'local';
+export type AppEnvProfile = 'development' | 'local' | 'test' | 'production';
 
-function resolveProfile(): AppEnvProfile {
-  const raw = process.env.APP_ENV?.trim().toLowerCase();
-  return raw === 'local' ? 'local' : 'development';
+export function normalizeAppEnv(value?: string): AppEnvProfile {
+  const raw = value?.trim().toLowerCase();
+  if (raw === 'local' || raw === 'test' || raw === 'production') return raw;
+  return 'development';
 }
-
-const profile = resolveProfile();
 
 const baseFileByProfile: Record<AppEnvProfile, string> = {
   development: '.env.development',
   local: '.env.local',
+  test: '.env.test',
+  production: '.env.production',
 };
 
-const basePath = resolve(root, baseFileByProfile[profile]);
+export function baseEnvFileForAppEnv(profile: AppEnvProfile) {
+  return baseFileByProfile[profile];
+}
+
+const profile = normalizeAppEnv(process.env.APP_ENV);
+process.env.APP_ENV = profile;
+
+const basePath = resolve(root, baseEnvFileForAppEnv(profile));
 const envPath = resolve(root, '.env');
 
 /** 先按 APP_ENV 加载对应基础文件，再用根目录 .env 覆盖（密钥与个人覆盖放 .env） */

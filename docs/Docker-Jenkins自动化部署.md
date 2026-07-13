@@ -1,5 +1,7 @@
 # Docker + Jenkins 自动化部署文档
 
+> 状态：历史方案。当前发布默认以仓库根目录 `docs/本地直发部署指南.md` 为准，不再依赖 Jenkins 或服务器侧 `git fetch`。只有在明确要求恢复 Jenkins 流程时，才参考本文。
+
 本文档用于在一台空的 Linux 服务器上部署智慧社区项目，包含：
 
 - 后端：`intelligent-community-admin`，Node.js + Koa + Prisma

@@ -10,7 +10,31 @@ import { AdminService } from './modules/admin/admin.service';
 import { createRouter } from './routes';
 import { openApiDocument } from './swagger/openapi';
 
+function hostFromDatabaseUrl(value?: string) {
+  if (!value) return '(unset)';
+  try {
+    return new URL(value).hostname || '(unknown)';
+  } catch {
+    return '(invalid)';
+  }
+}
+
+function logRuntimeEnvironment() {
+  console.log('[env]', {
+    appEnv: process.env.APP_ENV || 'development',
+    nodeEnv: process.env.NODE_ENV || 'development',
+    port: process.env.PORT || '3000',
+    databaseHost: hostFromDatabaseUrl(process.env.DATABASE_URL),
+    redisHost: process.env.REDIS_HOST || '(disabled)',
+    redisDb: process.env.REDIS_DB || '0',
+    cosBucket: process.env.COS_BUCKET || '(unset)',
+    cosRegion: process.env.COS_REGION || '(unset)',
+    cosEnvPrefix: process.env.COS_ENV_PREFIX || 'test',
+  });
+}
+
 async function bootstrap() {
+  logRuntimeEnvironment();
   await prisma.$connect();
   await new AdminService().ensureDefaultSuperAdmin();
 

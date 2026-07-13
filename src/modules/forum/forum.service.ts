@@ -12,6 +12,7 @@ import {
   invalidateForumPostListCache,
   invalidateForumPostRepliesCache,
 } from '../../lib/redis-cache';
+import { adminContentAttributionForMiniPost } from '../admin/admin.service';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
 
 const MAX_POST_IMAGES = 9;
@@ -238,7 +239,14 @@ export class ForumService {
       throw new HttpError(400, '请输入内容或添加图片/视频');
     }
 
-    const { name: authorName, avatar: authorAvatar } = await this.getUserDisplayName(params.userId);
+    const [{ name: authorName, avatar: authorAvatar }, boundAdmin] = await Promise.all([
+      this.getUserDisplayName(params.userId),
+      prisma.adminUser.findFirst({
+        where: { boundUserId: params.userId, enabled: true },
+        select: { id: true, role: true, orgName: true },
+      }),
+    ]);
+    const adminAttribution = adminContentAttributionForMiniPost(boundAdmin);
     const row = await prisma.forumPost.create({
       data: {
         title,
@@ -248,6 +256,7 @@ export class ForumService {
         authorId: params.userId,
         authorName,
         authorAvatar: authorAvatar || null,
+        ...adminAttribution,
       },
     });
     await invalidateForumPostListCache();
@@ -798,6 +807,7 @@ export class ForumService {
       authorId: string;
       authorName: string | null;
       authorAvatar?: string | null;
+      adminLabel?: string | null;
       postType?: string | null;
       validUntil?: Date | null;
       pinned?: boolean;

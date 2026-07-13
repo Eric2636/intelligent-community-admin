@@ -9,6 +9,7 @@ import {
   taskPendingListCacheKey,
   TASK_PENDING_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
+import { adminContentAttributionForMiniPublisher } from '../admin/admin.service';
 
 const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
@@ -17,6 +18,14 @@ export class TaskService {
   private async getUserDisplayName(userId: string) {
     const row = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
     return row?.name ?? '邻居';
+  }
+
+  private async getMiniPublisherAdminAttribution(userId: string) {
+    const admin = await prisma.adminUser.findFirst({
+      where: { boundUserId: userId, enabled: true },
+      select: { id: true, role: true, orgName: true },
+    });
+    return adminContentAttributionForMiniPublisher(admin);
   }
 
   async getTaskDetail(taskId: string) {
@@ -45,11 +54,15 @@ export class TaskService {
       throw new HttpError(400, 'desc 与 images/videos 至少填写一项');
     }
     if (!reward) throw new HttpError(400, 'reward 不能为空');
+    if (Number.isNaN(Number(reward)) || Number(reward) < 0) throw new HttpError(400, '感谢金金额无效');
 
-    const publisher = await prisma.user.findUnique({
-      where: { id: params.publisherId },
-      select: { name: true },
-    });
+    const [publisher, adminAttribution] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: params.publisherId },
+        select: { name: true },
+      }),
+      this.getMiniPublisherAdminAttribution(params.publisherId),
+    ]);
 
     const images = parseStrictMediaUrlList(params.images, MAX_TASK_IMAGES, 'image', 'images');
     const videos = parseStrictMediaUrlList(params.videos, MAX_TASK_VIDEOS, 'video', 'videos');
@@ -65,6 +78,7 @@ export class TaskService {
         status: 'PENDING_TAKE',
         publisherId: params.publisherId,
         publisherName: publisher?.name ?? '',
+        ...adminAttribution,
       },
     });
 
@@ -87,10 +101,13 @@ export class TaskService {
     const reward = params.reward != null ? String(params.reward).trim() : '';
     const location = params.location != null ? String(params.location).trim() : '';
 
-    const publisher = await prisma.user.findUnique({
-      where: { id: params.userId },
-      select: { name: true },
-    });
+    const [publisher, adminAttribution] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: params.userId },
+        select: { name: true },
+      }),
+      this.getMiniPublisherAdminAttribution(params.userId),
+    ]);
 
     const images = parseStrictMediaUrlList(params.images, MAX_TASK_IMAGES, 'image', 'images');
     const videos = parseStrictMediaUrlList(params.videos, MAX_TASK_VIDEOS, 'video', 'videos');
@@ -105,6 +122,7 @@ export class TaskService {
       status: 'DRAFT' as const,
       publisherId: params.userId,
       publisherName: publisher?.name ?? '',
+      ...adminAttribution,
     };
 
     const id = params.taskId ? String(params.taskId).trim() : '';
@@ -124,6 +142,7 @@ export class TaskService {
   async publishDraft(params: { taskId: string; userId: string }) {
     const id = String(params.taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
+    const adminAttribution = await this.getMiniPublisherAdminAttribution(params.userId);
     return prisma.$transaction(async (tx) => {
       const row = await tx.task.findFirst({ where: { id, ...contentNotDeleted } });
       if (!row) throw new HttpError(404, '任务不存在');
@@ -137,9 +156,13 @@ export class TaskService {
       const videos = Array.isArray(row.videos) ? row.videos : [];
       if (!title || title === '未命名草稿') throw new HttpError(400, '请填写任务标题');
       if (!desc && images.length === 0 && videos.length === 0) throw new HttpError(400, '请填写任务说明或添加图片/视频');
-      if (!reward) throw new HttpError(400, '请填写佣金');
+      if (!reward) throw new HttpError(400, '请填写感谢金');
+      if (Number.isNaN(Number(reward)) || Number(reward) < 0) throw new HttpError(400, '感谢金金额无效');
       if (!location) throw new HttpError(400, '请填写地点');
-      const updated = await tx.task.update({ where: { id }, data: { status: 'PENDING_TAKE' } });
+      const updated = await tx.task.update({
+        where: { id },
+        data: { status: 'PENDING_TAKE', ...(row.adminLabel ? {} : adminAttribution) },
+      });
       return this.mapTask(updated);
     }).then(async (mapped) => {
       await invalidatePendingTasksListCache();

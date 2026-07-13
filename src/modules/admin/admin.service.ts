@@ -54,6 +54,25 @@ export type AdminOperator = {
   role: 'ADMIN' | 'SUPERADMIN';
 };
 
+export const DEFAULT_SUPER_ADMIN_ORG_NAME = '平台管理员';
+
+export function adminDisplayLabelForContent(admin: { role: 'ADMIN' | 'SUPERADMIN'; orgName?: string | null }) {
+  if (admin.role === 'SUPERADMIN') return DEFAULT_SUPER_ADMIN_ORG_NAME;
+  return admin.orgName?.trim() || '网站管理员';
+}
+
+export function adminContentAttributionForMiniPublisher(
+  admin: { id: string; role: 'ADMIN' | 'SUPERADMIN'; orgName?: string | null } | null,
+) {
+  if (!admin) return {};
+  return {
+    adminLabel: adminDisplayLabelForContent(admin),
+    createdByAdminId: admin.id,
+  };
+}
+
+export const adminContentAttributionForMiniPost = adminContentAttributionForMiniPublisher;
+
 function adminJwtSecret() {
   return process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET;
 }
@@ -309,7 +328,7 @@ export class AdminService {
         passwordHash,
         role: 'SUPERADMIN',
         type: 'OFFICIAL',
-        orgName: '平台',
+        orgName: DEFAULT_SUPER_ADMIN_ORG_NAME,
         enabled: true,
       },
     });
@@ -1102,9 +1121,9 @@ export class AdminService {
     const pin = dto.pinned ?? false;
     const op = await prisma.adminUser.findUnique({
       where: { id: operator.adminId },
-      select: { orgName: true },
+      select: { role: true, orgName: true },
     });
-    const adminLabel = op?.orgName?.trim() || '网站管理员';
+    const adminLabel = op ? adminDisplayLabelForContent(op) : '网站管理员';
 
     if (type === 'errands') {
       const title = (dto.title || '').trim();

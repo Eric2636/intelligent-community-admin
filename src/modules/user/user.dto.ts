@@ -1,4 +1,5 @@
-import { IsArray, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsArray, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { USER_IDENTITY_TYPES, type UserIdentityType } from './user-identity';
 
 export class UpdateMeDto {
   @IsOptional()
@@ -10,10 +11,18 @@ export class UpdateMeDto {
   avatar?: string;
 
   @IsOptional()
+  @IsIn(USER_IDENTITY_TYPES)
+  identityType?: UserIdentityType;
+
+  @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(2)
+  @Max(1)
   gender?: number;
+
+  @IsOptional()
+  @IsString()
+  householdNo?: string;
 
   @IsOptional()
   @IsString()
@@ -31,4 +40,3 @@ export class UpdateMeDto {
   @IsString()
   brief?: string;
 }
-

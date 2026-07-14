@@ -13,6 +13,7 @@ import {
   invalidateForumPostRepliesCache,
 } from '../../lib/redis-cache';
 import { adminContentAttributionForMiniPost } from '../admin/admin.service';
+import { identityTypeLabel } from '../user/user-identity';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
 
 const MAX_POST_IMAGES = 9;
@@ -26,8 +27,11 @@ function jsonMedia(arr: string[]): Prisma.InputJsonValue {
 
 export class ForumService {
   private async getUserDisplayName(userId: string) {
-    const row = await prisma.user.findUnique({ where: { id: userId }, select: { name: true, avatar: true } });
-    return { name: row?.name ?? '邻居', avatar: row?.avatar ?? '' };
+    const row = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, avatar: true, identityType: true },
+    });
+    return { name: row?.name ?? '邻居', avatar: row?.avatar ?? '', identityType: row?.identityType ?? null };
   }
 
   private reviveForumReplyRows(rows: ForumReply[]): ForumReply[] {
@@ -46,7 +50,7 @@ export class ForumService {
   }
 
   async listPosts(params: {
-    userId: string;
+    userId?: string;
     page: number;
     pageSize: number;
     keyword?: string;
@@ -96,7 +100,7 @@ export class ForumService {
 
     const uniqueIds = [...new Set([...pinnedRows, ...listRows].map((r) => r.id))];
     const [liked, favorited] =
-      uniqueIds.length === 0
+      !userId || uniqueIds.length === 0
         ? [[], []]
         : await Promise.all([
             prisma.forumPostLike.findMany({
@@ -111,7 +115,7 @@ export class ForumService {
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
 
-    const mapOne = (p: (typeof pinnedRows)[number]) => this.mapPostListItem(p, userId, likedSet.has(p.id), favSet.has(p.id));
+    const mapOne = (p: (typeof pinnedRows)[number]) => this.mapPostListItem(p, userId || '', likedSet.has(p.id), favSet.has(p.id));
 
     return {
       pinned: pinnedRows.map(mapOne),
@@ -120,7 +124,7 @@ export class ForumService {
     };
   }
 
-  async listAnnouncements(params: { userId: string; limit?: number }) {
+  async listAnnouncements(params: { userId?: string; limit?: number }) {
     const limit = Math.min(Math.max(Number(params.limit || 5), 1), 10);
     const rows = await prisma.forumPost.findMany({
       where: {
@@ -135,24 +139,26 @@ export class ForumService {
     if (rows.length === 0) return [];
 
     const ids = rows.map((r) => r.id);
-    const [liked, favorited] = await Promise.all([
-      prisma.forumPostLike.findMany({
-        where: { userId: params.userId, postId: { in: ids } },
-        select: { postId: true },
-      }),
-      prisma.forumPostFavorite.findMany({
-        where: { userId: params.userId, postId: { in: ids } },
-        select: { postId: true },
-      }),
-    ]);
+    const [liked, favorited] = params.userId
+      ? await Promise.all([
+          prisma.forumPostLike.findMany({
+            where: { userId: params.userId, postId: { in: ids } },
+            select: { postId: true },
+          }),
+          prisma.forumPostFavorite.findMany({
+            where: { userId: params.userId, postId: { in: ids } },
+            select: { postId: true },
+          }),
+        ])
+      : [[], []];
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
 
-    return rows.map((p) => this.mapPostListItem(p, params.userId, likedSet.has(p.id), favSet.has(p.id)));
+    return rows.map((p) => this.mapPostListItem(p, params.userId || '', likedSet.has(p.id), favSet.has(p.id)));
   }
 
-  async getPostDetail(params: { userId: string; postId: string }) {
-    const { userId } = params;
+  async getPostDetail(params: { userId?: string; postId: string }) {
+    const userId = params.userId || '';
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
 
@@ -172,14 +178,18 @@ export class ForumService {
           orderBy: { createdAt: 'asc' },
         }),
       ),
-      prisma.forumPostLike.findUnique({
-        where: { postId_userId: { postId: id, userId } },
-        select: { id: true },
-      }),
-      prisma.forumPostFavorite.findUnique({
-        where: { postId_userId: { postId: id, userId } },
-        select: { id: true },
-      }),
+      userId
+        ? prisma.forumPostLike.findUnique({
+            where: { postId_userId: { postId: id, userId } },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+      userId
+        ? prisma.forumPostFavorite.findUnique({
+            where: { postId_userId: { postId: id, userId } },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
     ]);
 
     const replyRows = this.reviveForumReplyRows(replyRowsRaw);
@@ -239,7 +249,7 @@ export class ForumService {
       throw new HttpError(400, '请输入内容或添加图片/视频');
     }
 
-    const [{ name: authorName, avatar: authorAvatar }, boundAdmin] = await Promise.all([
+    const [{ name: authorName, avatar: authorAvatar, identityType }, boundAdmin] = await Promise.all([
       this.getUserDisplayName(params.userId),
       prisma.adminUser.findFirst({
         where: { boundUserId: params.userId, enabled: true },
@@ -256,6 +266,7 @@ export class ForumService {
         authorId: params.userId,
         authorName,
         authorAvatar: authorAvatar || null,
+        authorIdentity: identityType,
         ...adminAttribution,
       },
     });
@@ -307,7 +318,7 @@ export class ForumService {
       }
     }
 
-    const { name: authorName, avatar: authorAvatar } = await this.getUserDisplayName(params.userId);
+    const { name: authorName, avatar: authorAvatar, identityType } = await this.getUserDisplayName(params.userId);
     const row = await prisma.$transaction(async (tx) => {
       const r = await tx.forumReply.create({
         data: {
@@ -316,6 +327,7 @@ export class ForumService {
           replyToAuthorName,
           authorId: params.userId,
           authorName,
+          authorIdentity: identityType,
           content,
           images: jsonMedia(images),
           videos: jsonMedia(videos),
@@ -335,6 +347,8 @@ export class ForumService {
       replyToAuthorName: row.replyToAuthorName,
       authorId: row.authorId,
       authorName: row.authorName ?? '',
+      authorIdentity: row.authorIdentity ?? '',
+      authorIdentityLabel: identityTypeLabel(row.authorIdentity),
       authorAvatar,
       isAuthor: true,
       content: row.content,
@@ -615,6 +629,7 @@ export class ForumService {
       replyToAuthorName: string | null;
       authorId: string;
       authorName: string | null;
+      authorIdentity?: string | null;
       content: string;
       images: unknown;
       videos: unknown;
@@ -627,18 +642,24 @@ export class ForumService {
     const ids = rows.map((r) => r.id);
     const authorIds = [...new Set(rows.map((r) => r.authorId).filter(Boolean))];
     const [likes, favs, userReactions, reactionAgg, users] = await Promise.all([
-      prisma.forumReplyLike.findMany({
-        where: { userId, replyId: { in: ids } },
-        select: { replyId: true },
-      }),
-      prisma.forumReplyFavorite.findMany({
-        where: { userId, replyId: { in: ids } },
-        select: { replyId: true },
-      }),
-      prisma.forumReplyReaction.findMany({
-        where: { userId, replyId: { in: ids } },
-        select: { replyId: true, emoji: true },
-      }),
+      userId
+        ? prisma.forumReplyLike.findMany({
+            where: { userId, replyId: { in: ids } },
+            select: { replyId: true },
+          })
+        : Promise.resolve([]),
+      userId
+        ? prisma.forumReplyFavorite.findMany({
+            where: { userId, replyId: { in: ids } },
+            select: { replyId: true },
+          })
+        : Promise.resolve([]),
+      userId
+        ? prisma.forumReplyReaction.findMany({
+            where: { userId, replyId: { in: ids } },
+            select: { replyId: true, emoji: true },
+          })
+        : Promise.resolve([]),
       prisma.forumReplyReaction.groupBy({
         by: ['replyId', 'emoji'],
         where: { replyId: { in: ids } },
@@ -651,8 +672,8 @@ export class ForumService {
     ]);
     const likedSet = new Set(likes.map((x) => x.replyId));
     const favSet = new Set(favs.map((x) => x.replyId));
-    const myReactMap = new Map(userReactions.map((x) => [x.replyId, x.emoji]));
-    const userAvatarMap = new Map(users.map((x) => [x.id, x.avatar ?? '']));
+    const myReactMap = new Map(userReactions.map((x) => [x.replyId, x.emoji] as const));
+    const userAvatarMap = new Map(users.map((x) => [x.id, x.avatar ?? ''] as const));
     const countMap = new Map<string, Record<string, number>>();
     for (const g of reactionAgg) {
       if (!countMap.has(g.replyId)) countMap.set(g.replyId, {});
@@ -667,6 +688,8 @@ export class ForumService {
       replyToAuthorName: r.replyToAuthorName,
       authorId: r.authorId,
       authorName: r.authorName ?? '',
+      authorIdentity: r.authorIdentity ?? '',
+      authorIdentityLabel: identityTypeLabel(r.authorIdentity),
       authorAvatar: userAvatarMap.get(r.authorId) ?? '',
       isAuthor: r.authorId === userId,
       content: r.content,
@@ -753,6 +776,7 @@ export class ForumService {
       videos: unknown;
       authorId: string;
       authorName: string | null;
+      authorIdentity?: string | null;
       authorAvatar?: string | null;
       adminLabel?: string | null;
       postType?: string | null;
@@ -780,6 +804,8 @@ export class ForumService {
       pinned: Boolean(p.pinned),
       authorId: p.authorId,
       authorName: p.authorName ?? '',
+      authorIdentity: p.authorIdentity ?? '',
+      authorIdentityLabel: identityTypeLabel(p.authorIdentity),
       authorAvatar: p.authorAvatar ?? '',
       adminLabel: p.adminLabel ?? '',
       postType: p.postType ?? 'NORMAL',
@@ -806,6 +832,7 @@ export class ForumService {
       videos: unknown;
       authorId: string;
       authorName: string | null;
+      authorIdentity?: string | null;
       authorAvatar?: string | null;
       adminLabel?: string | null;
       postType?: string | null;

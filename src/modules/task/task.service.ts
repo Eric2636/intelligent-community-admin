@@ -10,6 +10,7 @@ import {
   TASK_PENDING_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
 import { adminContentAttributionForMiniPublisher } from '../admin/admin.service';
+import { identityTypeLabel } from '../user/user-identity';
 
 const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
@@ -59,7 +60,7 @@ export class TaskService {
     const [publisher, adminAttribution] = await Promise.all([
       prisma.user.findUnique({
         where: { id: params.publisherId },
-        select: { name: true },
+        select: { name: true, identityType: true },
       }),
       this.getMiniPublisherAdminAttribution(params.publisherId),
     ]);
@@ -78,6 +79,7 @@ export class TaskService {
         status: 'PENDING_TAKE',
         publisherId: params.publisherId,
         publisherName: publisher?.name ?? '',
+        publisherIdentity: publisher?.identityType ?? null,
         ...adminAttribution,
       },
     });
@@ -104,7 +106,7 @@ export class TaskService {
     const [publisher, adminAttribution] = await Promise.all([
       prisma.user.findUnique({
         where: { id: params.userId },
-        select: { name: true },
+        select: { name: true, identityType: true },
       }),
       this.getMiniPublisherAdminAttribution(params.userId),
     ]);
@@ -122,6 +124,7 @@ export class TaskService {
       status: 'DRAFT' as const,
       publisherId: params.userId,
       publisherName: publisher?.name ?? '',
+      publisherIdentity: publisher?.identityType ?? null,
       ...adminAttribution,
     };
 
@@ -399,6 +402,7 @@ export class TaskService {
     pinned?: boolean;
     publisherId: string;
     publisherName: string | null;
+    publisherIdentity?: string | null;
     adminLabel?: string | null;
     takerId: string | null;
     takerName: string | null;
@@ -422,6 +426,8 @@ export class TaskService {
       pinned: Boolean(t.pinned),
       publisherId: t.publisherId,
       publisherName: t.publisherName ?? '',
+      publisherIdentity: t.publisherIdentity ?? '',
+      publisherIdentityLabel: identityTypeLabel(t.publisherIdentity),
       adminLabel: t.adminLabel ?? '',
       takerId: t.takerId ?? '',
       takerName: t.takerName ?? '',

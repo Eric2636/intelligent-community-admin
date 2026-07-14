@@ -2,7 +2,11 @@ import type { Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
 import { isImageMediaUrl, parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
-import { invalidateForumPostListCache, invalidateForumPostRepliesCache } from '../../lib/redis-cache';
+import {
+  invalidateForumPostListCache,
+  invalidateForumPostRepliesCache,
+  invalidatePendingTasksListCache,
+} from '../../lib/redis-cache';
 import type { UpdateMeDto } from './user.dto';
 
 const MAX_USER_PHOTOS = 20;
@@ -17,7 +21,9 @@ export class UserService {
         phoneNumber: true,
         name: true,
         avatar: true,
+        identityType: true,
         gender: true,
+        householdNo: true,
         birth: true,
         address: true,
         photos: true,
@@ -44,7 +50,7 @@ export class UserService {
         : (parseStrictMediaUrlList(dto.photos, MAX_USER_PHOTOS, 'image', 'photos') as unknown as Prisma.InputJsonValue);
 
     const touchedReplyPostIds = new Set<string>();
-    const shouldRefreshForumCache = dto.name !== undefined || dto.avatar !== undefined;
+    const shouldRefreshForumCache = dto.name !== undefined || dto.avatar !== undefined || dto.identityType !== undefined;
     const user = await prisma.$transaction(async (tx) => {
       if (shouldRefreshForumCache) {
         const replies = await tx.forumReply.findMany({
@@ -60,7 +66,9 @@ export class UserService {
         data: {
           name: dto.name,
           avatar: dto.avatar,
+          identityType: dto.identityType,
           gender: dto.gender,
+          householdNo: dto.householdNo,
           birth: dto.birth,
           address: dto.address as Prisma.InputJsonValue | undefined,
           ...(dto.photos === undefined ? {} : { photos }),
@@ -72,7 +80,9 @@ export class UserService {
           phoneNumber: true,
           name: true,
           avatar: true,
+          identityType: true,
           gender: true,
+          householdNo: true,
           birth: true,
           address: true,
           photos: true,
@@ -92,6 +102,10 @@ export class UserService {
         forumReplyData.authorName = updated.name;
       }
       if (dto.avatar !== undefined) forumPostData.authorAvatar = updated.avatar;
+      if (dto.identityType !== undefined) {
+        forumPostData.authorIdentity = updated.identityType;
+        forumReplyData.authorIdentity = updated.identityType;
+      }
 
       await Promise.all([
         Object.keys(forumPostData).length
@@ -99,6 +113,9 @@ export class UserService {
           : Promise.resolve(),
         Object.keys(forumReplyData).length
           ? tx.forumReply.updateMany({ where: { authorId: userId }, data: forumReplyData })
+          : Promise.resolve(),
+        dto.identityType !== undefined
+          ? tx.task.updateMany({ where: { publisherId: userId }, data: { publisherIdentity: updated.identityType } })
           : Promise.resolve(),
       ]);
 
@@ -110,6 +127,7 @@ export class UserService {
         ...Array.from(touchedReplyPostIds).map((postId) => invalidateForumPostRepliesCache(postId)),
       ]);
     }
+    if (dto.identityType !== undefined) await invalidatePendingTasksListCache();
     return user;
   }
 }

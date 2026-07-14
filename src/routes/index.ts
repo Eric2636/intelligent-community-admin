@@ -110,8 +110,8 @@ export function createRouter() {
   });
 
   // 小区留言（帖子）列表
-  router.get('/api/posts', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
+  router.get('/api/posts', async (ctx) => {
+    const { userId } = tryGetUserFromBearer(ctx.headers.authorization);
     const q = await parseDto(GetForumPostsQueryDto, ctx.query);
     const page = q.page ?? 1;
     const pageSize = q.pageSize ?? 10;
@@ -137,15 +137,15 @@ export function createRouter() {
     ctx.body = { code: 200, data };
   });
 
-  router.get('/api/posts/announcements', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
+  router.get('/api/posts/announcements', async (ctx) => {
+    const { userId } = tryGetUserFromBearer(ctx.headers.authorization);
     const q = await parseDto(GetForumAnnouncementsQueryDto, ctx.query);
     const data = await forumService.listAnnouncements({ userId, limit: q.limit });
     ctx.body = { code: 200, data };
   });
 
-  router.get('/api/posts/:postId', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
+  router.get('/api/posts/:postId', async (ctx) => {
+    const { userId } = tryGetUserFromBearer(ctx.headers.authorization);
     const postId = String((ctx.params as { postId?: string }).postId || '').trim();
     const data = await forumService.getPostDetail({ userId, postId });
     ctx.body = { code: 200, data };
@@ -258,7 +258,7 @@ export function createRouter() {
     ctx.body = { code: 200, data: await forumService.unfavorite({ userId, postId }) };
   });
 
-  router.post('/api/posts/:postId/share', jwtAuth, async (ctx) => {
+  router.post('/api/posts/:postId/share', async (ctx) => {
     const postId = String((ctx.params as { postId?: string }).postId || '').trim();
     ctx.body = { code: 200, data: await forumService.share({ postId }) };
   });

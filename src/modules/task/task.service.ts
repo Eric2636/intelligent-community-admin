@@ -10,7 +10,7 @@ import {
   TASK_PENDING_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
 import { adminContentAttributionForMiniPublisher } from '../admin/admin.service';
-import { identityTypeLabel } from '../user/user-identity';
+import { contentIdentityTag, identityTypeLabel } from '../user/user-identity';
 
 const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
@@ -413,6 +413,7 @@ export class TaskService {
     completedAt: Date | null;
     confirmedAt: Date | null;
   }) {
+    const tag = contentIdentityTag(t.publisherIdentity, t.adminLabel);
     return {
       _id: t.id,
       title: t.title,
@@ -429,6 +430,8 @@ export class TaskService {
       publisherIdentity: t.publisherIdentity ?? '',
       publisherIdentityLabel: identityTypeLabel(t.publisherIdentity),
       adminLabel: t.adminLabel ?? '',
+      contentTagLabel: tag.label,
+      contentTagType: tag.type,
       takerId: t.takerId ?? '',
       takerName: t.takerName ?? '',
       proofText: t.proofText ?? '',

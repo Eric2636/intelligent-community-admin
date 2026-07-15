@@ -7,36 +7,51 @@ import {
   invalidateForumPostRepliesCache,
   invalidatePendingTasksListCache,
 } from '../../lib/redis-cache';
+import { adminDisplayLabelForContent } from '../admin/admin.service';
+import { contentIdentityTag } from './user-identity';
 import type { UpdateMeDto } from './user.dto';
 
 const MAX_USER_PHOTOS = 20;
 
 export class UserService {
   async getMe(userId: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        openid: true,
-        phoneNumber: true,
-        name: true,
-        avatar: true,
-        identityType: true,
-        gender: true,
-        householdNo: true,
-        birth: true,
-        address: true,
-        photos: true,
-        brief: true,
-        enabled: true,
-        disabledAt: true,
-        disabledReason: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    const [user, admin] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          openid: true,
+          phoneNumber: true,
+          name: true,
+          avatar: true,
+          identityType: true,
+          gender: true,
+          householdNo: true,
+          birth: true,
+          address: true,
+          photos: true,
+          brief: true,
+          enabled: true,
+          disabledAt: true,
+          disabledReason: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      }),
+      prisma.adminUser.findFirst({
+        where: { boundUserId: userId, enabled: true },
+        select: { role: true, orgName: true },
+      }),
+    ]);
     if (!user) throw new HttpError(404, '用户不存在');
-    return user;
+    const adminLabel = admin ? adminDisplayLabelForContent(admin) : '';
+    const tag = contentIdentityTag(user.identityType, adminLabel);
+    return {
+      ...user,
+      adminLabel,
+      contentTagLabel: tag.label,
+      contentTagType: tag.type,
+    };
   }
 
   async updateMe(userId: string, dto: UpdateMeDto) {

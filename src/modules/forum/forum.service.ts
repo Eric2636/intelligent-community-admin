@@ -12,8 +12,8 @@ import {
   invalidateForumPostListCache,
   invalidateForumPostRepliesCache,
 } from '../../lib/redis-cache';
-import { adminContentAttributionForMiniPost } from '../admin/admin.service';
-import { identityTypeLabel } from '../user/user-identity';
+import { adminContentAttributionForMiniPost, adminDisplayLabelForContent } from '../admin/admin.service';
+import { contentIdentityTag, identityTypeLabel } from '../user/user-identity';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
 
 const MAX_POST_IMAGES = 9;
@@ -318,7 +318,15 @@ export class ForumService {
       }
     }
 
-    const { name: authorName, avatar: authorAvatar, identityType } = await this.getUserDisplayName(params.userId);
+    const [{ name: authorName, avatar: authorAvatar, identityType }, boundAdmin] = await Promise.all([
+      this.getUserDisplayName(params.userId),
+      prisma.adminUser.findFirst({
+        where: { boundUserId: params.userId, enabled: true },
+        select: { role: true, orgName: true },
+      }),
+    ]);
+    const adminLabel = boundAdmin ? adminDisplayLabelForContent(boundAdmin) : '';
+    const tag = contentIdentityTag(identityType, adminLabel);
     const row = await prisma.$transaction(async (tx) => {
       const r = await tx.forumReply.create({
         data: {
@@ -349,6 +357,9 @@ export class ForumService {
       authorName: row.authorName ?? '',
       authorIdentity: row.authorIdentity ?? '',
       authorIdentityLabel: identityTypeLabel(row.authorIdentity),
+      adminLabel,
+      contentTagLabel: tag.label,
+      contentTagType: tag.type,
       authorAvatar,
       isAuthor: true,
       content: row.content,
@@ -641,7 +652,7 @@ export class ForumService {
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
     const authorIds = [...new Set(rows.map((r) => r.authorId).filter(Boolean))];
-    const [likes, favs, userReactions, reactionAgg, users] = await Promise.all([
+    const [likes, favs, userReactions, reactionAgg, users, admins] = await Promise.all([
       userId
         ? prisma.forumReplyLike.findMany({
             where: { userId, replyId: { in: ids } },
@@ -669,41 +680,57 @@ export class ForumService {
         where: { id: { in: authorIds } },
         select: { id: true, avatar: true },
       }),
+      prisma.adminUser.findMany({
+        where: { boundUserId: { in: authorIds }, enabled: true },
+        select: { boundUserId: true, role: true, orgName: true },
+      }),
     ]);
     const likedSet = new Set(likes.map((x) => x.replyId));
     const favSet = new Set(favs.map((x) => x.replyId));
     const myReactMap = new Map(userReactions.map((x) => [x.replyId, x.emoji] as const));
     const userAvatarMap = new Map(users.map((x) => [x.id, x.avatar ?? ''] as const));
+    const adminLabelMap = new Map(
+      admins
+        .filter((x) => x.boundUserId)
+        .map((x) => [x.boundUserId!, adminDisplayLabelForContent(x)] as const),
+    );
     const countMap = new Map<string, Record<string, number>>();
     for (const g of reactionAgg) {
       if (!countMap.has(g.replyId)) countMap.set(g.replyId, {});
       countMap.get(g.replyId)![g.emoji] = g._count._all;
     }
 
-    const mapBase = (r: (typeof rows)[number]) => ({
-      _id: r.id,
-      id: r.id,
-      postId: r.postId,
-      parentReplyId: r.parentReplyId,
-      replyToAuthorName: r.replyToAuthorName,
-      authorId: r.authorId,
-      authorName: r.authorName ?? '',
-      authorIdentity: r.authorIdentity ?? '',
-      authorIdentityLabel: identityTypeLabel(r.authorIdentity),
-      authorAvatar: userAvatarMap.get(r.authorId) ?? '',
-      isAuthor: r.authorId === userId,
-      content: r.content,
-      images: Array.isArray(r.images) ? r.images : r.images ?? [],
-      videos: Array.isArray(r.videos) ? r.videos : r.videos ?? [],
-      likeCount: r.likeCount,
-      isLiked: likedSet.has(r.id),
-      favoriteCount: r.favoriteCount,
-      isFavorited: favSet.has(r.id),
-      reactionCounts: countMap.get(r.id) ?? {},
-      myReaction: myReactMap.get(r.id) ?? '',
-      createdAt: r.createdAt.toISOString(),
-      createTime: r.createdAt.toISOString(),
-    });
+    const mapBase = (r: (typeof rows)[number]) => {
+      const adminLabel = adminLabelMap.get(r.authorId) ?? '';
+      const tag = contentIdentityTag(r.authorIdentity, adminLabel);
+      return {
+        _id: r.id,
+        id: r.id,
+        postId: r.postId,
+        parentReplyId: r.parentReplyId,
+        replyToAuthorName: r.replyToAuthorName,
+        authorId: r.authorId,
+        authorName: r.authorName ?? '',
+        authorIdentity: r.authorIdentity ?? '',
+        authorIdentityLabel: identityTypeLabel(r.authorIdentity),
+        adminLabel,
+        contentTagLabel: tag.label,
+        contentTagType: tag.type,
+        authorAvatar: userAvatarMap.get(r.authorId) ?? '',
+        isAuthor: r.authorId === userId,
+        content: r.content,
+        images: Array.isArray(r.images) ? r.images : r.images ?? [],
+        videos: Array.isArray(r.videos) ? r.videos : r.videos ?? [],
+        likeCount: r.likeCount,
+        isLiked: likedSet.has(r.id),
+        favoriteCount: r.favoriteCount,
+        isFavorited: favSet.has(r.id),
+        reactionCounts: countMap.get(r.id) ?? {},
+        myReaction: myReactMap.get(r.id) ?? '',
+        createdAt: r.createdAt.toISOString(),
+        createTime: r.createdAt.toISOString(),
+      };
+    };
 
     type Node = ReturnType<typeof mapBase> & { children: Node[] };
     const nodes = new Map<string, Node>();
@@ -794,6 +821,7 @@ export class ForumService {
   ) {
     const images = Array.isArray(p.images) ? p.images : p.images ?? [];
     const videos = Array.isArray(p.videos) ? p.videos : p.videos ?? [];
+    const tag = contentIdentityTag(p.authorIdentity, p.adminLabel);
     return {
       _id: p.id,
       id: p.id,
@@ -808,6 +836,8 @@ export class ForumService {
       authorIdentityLabel: identityTypeLabel(p.authorIdentity),
       authorAvatar: p.authorAvatar ?? '',
       adminLabel: p.adminLabel ?? '',
+      contentTagLabel: tag.label,
+      contentTagType: tag.type,
       postType: p.postType ?? 'NORMAL',
       validUntil: p.validUntil ? p.validUntil.toISOString() : '',
       viewCount: p.viewCount ?? 0,

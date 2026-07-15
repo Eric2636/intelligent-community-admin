@@ -15,3 +15,13 @@ export function identityTypeLabel(value: unknown) {
   if (type === 'OUTSIDER') return '小区外人员';
   return '';
 }
+
+export function contentIdentityTag(identityType: unknown, adminLabel: unknown) {
+  const label = typeof adminLabel === 'string' ? adminLabel.trim() : '';
+  if (label) return { label, type: 'admin' };
+
+  const type = normalizeIdentityType(identityType);
+  if (type === 'OWNER') return { label: '业主', type: 'owner' };
+  if (type === 'OUTSIDER') return { label: '小区外人员', type: 'outsider' };
+  return { label: '', type: '' };
+}

@@ -20,6 +20,7 @@ import type { AdminCreateContentDto, AdminUpdateContentDto } from './admin.dto';
 import { MallCommentService } from '../mall/mall-comment.service';
 import { MallCategoryService } from '../mall/mall-category.service';
 import { jsonImages } from '../mall/mall.serialize';
+import { contentIdentityTag } from '../user/user-identity';
 import {
   createCaptcha,
   getIpLockUntil,
@@ -37,6 +38,14 @@ type AdminTokenPayload = {
   username: string;
   role: 'ADMIN' | 'SUPERADMIN';
   typ: 'access' | 'refresh';
+};
+
+type AdminLoginFailureBody = {
+  statusCode: number;
+  message: string;
+  needCaptcha?: boolean;
+  lockUntil?: number | null;
+  failCount?: number;
 };
 
 function randomAdminPassword(length = 14): string {
@@ -156,7 +165,7 @@ export class AdminService {
     adminUsername: string;
     ip: string;
     action: string;
-    detail?: unknown;
+    detail?: Prisma.InputJsonValue;
   }) {
     const adminId = String(params.adminId || '').trim();
     const adminUsername = String(params.adminUsername || '').trim();
@@ -169,7 +178,7 @@ export class AdminService {
         adminUsername,
         ip,
         action,
-        detail: params.detail as any,
+        detail: params.detail,
       },
     });
   }
@@ -233,7 +242,7 @@ export class AdminService {
           admin: ReturnType<typeof mapAdmin>;
         };
       }
-    | { ok: false; statusCode: number; body: any }
+    | { ok: false; statusCode: number; body: AdminLoginFailureBody }
   > {
     const username = String(params.username || '').trim();
     const password = String(params.password || '').trim();
@@ -434,6 +443,7 @@ export class AdminService {
           phoneNumber: true,
           name: true,
           avatar: true,
+          identityType: true,
           gender: true,
           householdNo: true,
           enabled: true,
@@ -445,14 +455,33 @@ export class AdminService {
       }),
     ]);
 
+    const userIds = rows.map((row) => row.id);
+    const boundAdmins = userIds.length
+      ? await prisma.adminUser.findMany({
+          where: { boundUserId: { in: userIds }, enabled: true },
+          select: { boundUserId: true, role: true, orgName: true },
+        })
+      : [];
+    const adminLabelByUserId = new Map(
+      boundAdmins
+        .filter((admin) => admin.boundUserId)
+        .map((admin) => [admin.boundUserId!, adminDisplayLabelForContent(admin)]),
+    );
+
     return {
       total,
-      list: rows.map((row) => ({
-        ...row,
-        disabledAt: row.disabledAt ? row.disabledAt.toISOString() : '',
-        createdAt: row.createdAt.toISOString(),
-        updatedAt: row.updatedAt.toISOString(),
-      })),
+      list: rows.map((row) => {
+        const { identityType, ...user } = row;
+        const tag = contentIdentityTag(identityType, adminLabelByUserId.get(row.id) ?? '');
+        return {
+          ...user,
+          contentTagLabel: tag.label,
+          contentTagType: tag.type,
+          disabledAt: row.disabledAt ? row.disabledAt.toISOString() : '',
+          createdAt: row.createdAt.toISOString(),
+          updatedAt: row.updatedAt.toISOString(),
+        };
+      }),
     };
   }
 
@@ -1253,7 +1282,9 @@ export class AdminService {
     const reward = (dto.reward || '').trim();
     const location = (dto.location || '').trim();
     if (!title) throw new HttpError(400, 'title 不能为空');
-    if (!reward) throw new HttpError(400, 'reward 不能为空');
+    if (reward && (Number.isNaN(Number(reward)) || Number(reward) < 0)) {
+      throw new HttpError(400, '感谢金金额无效');
+    }
     const images = parseStrictMediaUrlList(dto.images, MAX_TASK_IMAGES, 'image', 'images');
     const videos = parseStrictMediaUrlList(dto.videos, MAX_TASK_VIDEOS, 'video', 'videos');
     if (!desc && images.length === 0 && videos.length === 0) {

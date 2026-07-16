@@ -41,7 +41,7 @@ export class TaskService {
     publisherId: string;
     title: string;
     desc: string;
-    reward: string;
+    reward?: string;
     location: string;
     images?: string[];
     videos?: string[];
@@ -54,8 +54,9 @@ export class TaskService {
     if (!desc && (!params.images?.length && !params.videos?.length)) {
       throw new HttpError(400, 'desc 与 images/videos 至少填写一项');
     }
-    if (!reward) throw new HttpError(400, 'reward 不能为空');
-    if (Number.isNaN(Number(reward)) || Number(reward) < 0) throw new HttpError(400, '感谢金金额无效');
+    if (reward && (Number.isNaN(Number(reward)) || Number(reward) < 0)) {
+      throw new HttpError(400, '感谢金金额无效');
+    }
 
     const [publisher, adminAttribution] = await Promise.all([
       prisma.user.findUnique({
@@ -159,8 +160,9 @@ export class TaskService {
       const videos = Array.isArray(row.videos) ? row.videos : [];
       if (!title || title === '未命名草稿') throw new HttpError(400, '请填写任务标题');
       if (!desc && images.length === 0 && videos.length === 0) throw new HttpError(400, '请填写任务说明或添加图片/视频');
-      if (!reward) throw new HttpError(400, '请填写感谢金');
-      if (Number.isNaN(Number(reward)) || Number(reward) < 0) throw new HttpError(400, '感谢金金额无效');
+      if (reward && (Number.isNaN(Number(reward)) || Number(reward) < 0)) {
+        throw new HttpError(400, '感谢金金额无效');
+      }
       if (!location) throw new HttpError(400, '请填写地点');
       const updated = await tx.task.update({
         where: { id },

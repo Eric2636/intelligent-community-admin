@@ -27,8 +27,9 @@ export class CreateTaskDto {
   @IsString()
   desc!: string;
 
+  @IsOptional()
   @IsString()
-  reward!: string;
+  reward?: string;
 
   @IsString()
   location!: string;

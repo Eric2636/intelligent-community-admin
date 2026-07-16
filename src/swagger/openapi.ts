@@ -116,7 +116,7 @@ export const openApiDocument: Record<string, unknown> = {
       },
       CreateTaskBody: {
         type: 'object',
-        required: ['title', 'desc', 'reward', 'location'],
+        required: ['title', 'desc', 'location'],
         properties: {
           title: { type: 'string' },
           desc: { type: 'string' },

@@ -16,7 +16,7 @@ export class WechatLoginDto {
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(2)
+  @Max(1)
   gender?: number;
 }
 

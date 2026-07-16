@@ -20,6 +20,7 @@ import type { AdminCreateContentDto, AdminUpdateContentDto } from './admin.dto';
 import { MallCommentService } from '../mall/mall-comment.service';
 import { MallCategoryService } from '../mall/mall-category.service';
 import { jsonImages } from '../mall/mall.serialize';
+import { contentIdentityTag } from '../user/user-identity';
 import {
   createCaptcha,
   getIpLockUntil,
@@ -39,6 +40,14 @@ type AdminTokenPayload = {
   typ: 'access' | 'refresh';
 };
 
+type AdminLoginFailureBody = {
+  statusCode: number;
+  message: string;
+  needCaptcha?: boolean;
+  lockUntil?: number | null;
+  failCount?: number;
+};
+
 function randomAdminPassword(length = 14): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
   const bytes = randomBytes(length);
@@ -53,6 +62,25 @@ export type AdminOperator = {
   adminId: string;
   role: 'ADMIN' | 'SUPERADMIN';
 };
+
+export const DEFAULT_SUPER_ADMIN_ORG_NAME = '平台管理员';
+
+export function adminDisplayLabelForContent(admin: { role: 'ADMIN' | 'SUPERADMIN'; orgName?: string | null }) {
+  if (admin.role === 'SUPERADMIN') return DEFAULT_SUPER_ADMIN_ORG_NAME;
+  return admin.orgName?.trim() || '网站管理员';
+}
+
+export function adminContentAttributionForMiniPublisher(
+  admin: { id: string; role: 'ADMIN' | 'SUPERADMIN'; orgName?: string | null } | null,
+) {
+  if (!admin) return {};
+  return {
+    adminLabel: adminDisplayLabelForContent(admin),
+    createdByAdminId: admin.id,
+  };
+}
+
+export const adminContentAttributionForMiniPost = adminContentAttributionForMiniPublisher;
 
 function adminJwtSecret() {
   return process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET;
@@ -137,7 +165,7 @@ export class AdminService {
     adminUsername: string;
     ip: string;
     action: string;
-    detail?: unknown;
+    detail?: Prisma.InputJsonValue;
   }) {
     const adminId = String(params.adminId || '').trim();
     const adminUsername = String(params.adminUsername || '').trim();
@@ -150,7 +178,7 @@ export class AdminService {
         adminUsername,
         ip,
         action,
-        detail: params.detail as any,
+        detail: params.detail,
       },
     });
   }
@@ -214,7 +242,7 @@ export class AdminService {
           admin: ReturnType<typeof mapAdmin>;
         };
       }
-    | { ok: false; statusCode: number; body: any }
+    | { ok: false; statusCode: number; body: AdminLoginFailureBody }
   > {
     const username = String(params.username || '').trim();
     const password = String(params.password || '').trim();
@@ -309,7 +337,7 @@ export class AdminService {
         passwordHash,
         role: 'SUPERADMIN',
         type: 'OFFICIAL',
-        orgName: '平台',
+        orgName: DEFAULT_SUPER_ADMIN_ORG_NAME,
         enabled: true,
       },
     });
@@ -415,7 +443,9 @@ export class AdminService {
           phoneNumber: true,
           name: true,
           avatar: true,
+          identityType: true,
           gender: true,
+          householdNo: true,
           enabled: true,
           disabledAt: true,
           disabledReason: true,
@@ -425,14 +455,33 @@ export class AdminService {
       }),
     ]);
 
+    const userIds = rows.map((row) => row.id);
+    const boundAdmins = userIds.length
+      ? await prisma.adminUser.findMany({
+          where: { boundUserId: { in: userIds }, enabled: true },
+          select: { boundUserId: true, role: true, orgName: true },
+        })
+      : [];
+    const adminLabelByUserId = new Map(
+      boundAdmins
+        .filter((admin) => admin.boundUserId)
+        .map((admin) => [admin.boundUserId!, adminDisplayLabelForContent(admin)]),
+    );
+
     return {
       total,
-      list: rows.map((row) => ({
-        ...row,
-        disabledAt: row.disabledAt ? row.disabledAt.toISOString() : '',
-        createdAt: row.createdAt.toISOString(),
-        updatedAt: row.updatedAt.toISOString(),
-      })),
+      list: rows.map((row) => {
+        const { identityType, ...user } = row;
+        const tag = contentIdentityTag(identityType, adminLabelByUserId.get(row.id) ?? '');
+        return {
+          ...user,
+          contentTagLabel: tag.label,
+          contentTagType: tag.type,
+          disabledAt: row.disabledAt ? row.disabledAt.toISOString() : '',
+          createdAt: row.createdAt.toISOString(),
+          updatedAt: row.updatedAt.toISOString(),
+        };
+      }),
     };
   }
 
@@ -470,6 +519,7 @@ export class AdminService {
         name: true,
         avatar: true,
         gender: true,
+        householdNo: true,
         birth: true,
         address: true,
         photos: true,
@@ -1102,9 +1152,9 @@ export class AdminService {
     const pin = dto.pinned ?? false;
     const op = await prisma.adminUser.findUnique({
       where: { id: operator.adminId },
-      select: { orgName: true },
+      select: { role: true, orgName: true },
     });
-    const adminLabel = op?.orgName?.trim() || '网站管理员';
+    const adminLabel = op ? adminDisplayLabelForContent(op) : '网站管理员';
 
     if (type === 'errands') {
       const title = (dto.title || '').trim();
@@ -1232,7 +1282,9 @@ export class AdminService {
     const reward = (dto.reward || '').trim();
     const location = (dto.location || '').trim();
     if (!title) throw new HttpError(400, 'title 不能为空');
-    if (!reward) throw new HttpError(400, 'reward 不能为空');
+    if (reward && (Number.isNaN(Number(reward)) || Number(reward) < 0)) {
+      throw new HttpError(400, '感谢金金额无效');
+    }
     const images = parseStrictMediaUrlList(dto.images, MAX_TASK_IMAGES, 'image', 'images');
     const videos = parseStrictMediaUrlList(dto.videos, MAX_TASK_VIDEOS, 'video', 'videos');
     if (!desc && images.length === 0 && videos.length === 0) {

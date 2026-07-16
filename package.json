@@ -6,6 +6,7 @@
     "start": "node dist/main.js",
     "start:dev": "cross-env APP_ENV=development tsc-watch -p tsconfig.build.json --onSuccess \"node dist/main.js\"",
     "start:dev:local": "cross-env APP_ENV=local tsc-watch -p tsconfig.build.json --onSuccess \"node dist/main.js\"",
+    "start:dev:test": "cross-env APP_ENV=test tsc-watch -p tsconfig.build.json --onSuccess \"node dist/main.js\"",
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint \"{src,prisma}/**/*.ts\"",
     "prisma:generate": "dotenv -e .env.development -e .env -- prisma generate",

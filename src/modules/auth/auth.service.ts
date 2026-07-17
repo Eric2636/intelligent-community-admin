@@ -53,6 +53,10 @@ export function resolvePhoneLoginBindingAction(
   return 'upsert-current-openid';
 }
 
+export function defaultPhoneUserName(phoneNumber: string) {
+  return `用户${String(phoneNumber || '').trim().slice(-4)}`;
+}
+
 export class AuthService {
   private async code2Session(code: string): Promise<WechatSession> {
     const appid = process.env.WX_APPID;
@@ -242,7 +246,7 @@ export class AuthService {
             create: {
               openid: session.openid!,
               phoneNumber,
-              name: `用户${phoneNumber.slice(-4)}`,
+              name: defaultPhoneUserName(phoneNumber),
               gender: 0,
             },
             select: userSelect,

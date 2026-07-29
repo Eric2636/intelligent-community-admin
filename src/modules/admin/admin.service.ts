@@ -1,26 +1,26 @@
 import { randomBytes } from 'node:crypto';
+import type { Prisma, TaskStatus } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import jwt, { type SignOptions } from 'jsonwebtoken';
-import type { ErrandStatus, Prisma, TaskStatus } from '@prisma/client';
 import { HttpError } from '../../http-error';
 import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import {
-  invalidateErrandListCache,
-  invalidateErrandRepliesCache,
   invalidateForumPostListCache,
   invalidateForumPostRepliesCache,
   invalidateMallItemDetailCache,
   invalidateMallItemsListCache,
   invalidatePendingTasksListCache,
+  getRedisClient,
 } from '../../lib/redis-cache';
-import { getRedisClient } from '../../lib/redis-cache';
-import type { AdminCreateContentDto, AdminUpdateContentDto } from './admin.dto';
-import { MallCommentService } from '../mall/mall-comment.service';
 import { MallCategoryService } from '../mall/mall-category.service';
+import { MallCommentService } from '../mall/mall-comment.service';
 import { jsonImages } from '../mall/mall.serialize';
+import { avatarOrDefault } from '../user/default-avatar';
 import { contentIdentityTag } from '../user/user-identity';
+import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
+import { runAdminContentMutation } from './admin-content-mutation';
 import {
   createCaptcha,
   getIpLockUntil,
@@ -32,6 +32,7 @@ import {
   setAdminLastIp,
   getAdminLastIp,
 } from './admin-login-security';
+import type { AdminCreateContentDto, AdminUpdateContentDto } from './admin.dto';
 
 type AdminTokenPayload = {
   sub: string;
@@ -71,7 +72,11 @@ export function adminDisplayLabelForContent(admin: { role: 'ADMIN' | 'SUPERADMIN
 }
 
 export function adminContentAttributionForMiniPublisher(
-  admin: { id: string; role: 'ADMIN' | 'SUPERADMIN'; orgName?: string | null } | null,
+  admin: {
+    id: string;
+    role: 'ADMIN' | 'SUPERADMIN';
+    orgName?: string | null;
+  } | null,
 ) {
   if (!admin) return {};
   return {
@@ -110,35 +115,15 @@ function mapAdmin(row: Prisma.AdminUserGetPayload<{ select: ReturnType<typeof ad
   };
 }
 
-const MAX_ERRAND_IMAGES = 9;
-const MAX_ERRAND_VIDEOS = 2;
 const MAX_POST_IMAGES = 9;
 const MAX_POST_VIDEOS = 2;
 const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
 
-const ERRAND_STATUS_SET = new Set<ErrandStatus>(['PENDING_TAKE', 'IN_PROGRESS', 'COMPLETED']);
-const TASK_STATUS_SET = new Set<TaskStatus>([
-  'DRAFT',
-  'PENDING_TAKE',
-  'IN_PROGRESS',
-  'PENDING_CONFIRM',
-  'COMPLETED',
-  'CANCELLED',
-]);
 const FORUM_POST_TYPE_SET = new Set(['NORMAL', 'ANNOUNCEMENT']);
 
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
-}
-
-function parseRewardYuan(raw: string): { value: string } | { error: string } {
-  const s = String(raw ?? '').trim();
-  if (!s) return { error: '请输入佣金（元）' };
-  const n = parseFloat(s);
-  if (Number.isNaN(n) || n <= 0) return { error: '请输入有效佣金（元）' };
-  if (n > 99999) return { error: '佣金金额过大' };
-  return { value: String(n) };
 }
 
 function parseForumPostType(raw: string | undefined): 'NORMAL' | 'ANNOUNCEMENT' {
@@ -156,6 +141,35 @@ function parseAnnouncementValidUntil(raw: string | undefined, postType: 'NORMAL'
   return date;
 }
 
+export async function updateAdminTaskContentCas(
+  tx: Prisma.TransactionClient,
+  params: {
+    id: string;
+    publisherId: string;
+    status: string;
+    version: number;
+    data: Prisma.TaskUpdateInput;
+  },
+) {
+  const transition = await tx.task.updateMany({
+    where: {
+      id: params.id,
+      publisherId: params.publisherId,
+      status: params.status as TaskStatus,
+      version: params.version,
+      ...contentNotDeleted,
+    },
+    data: {
+      ...params.data,
+      version: { increment: 1 },
+    },
+  });
+  if (transition.count !== 1) throw new HttpError(409, '任务状态已变化，请刷新后重试');
+  const row = await tx.task.findUnique({ where: { id: params.id } });
+  if (!row) throw new HttpError(404, '内容不存在');
+  return row;
+}
+
 export class AdminService {
   private readonly mallComments = new MallCommentService();
   private readonly mallCategories = new MallCategoryService();
@@ -165,6 +179,7 @@ export class AdminService {
     adminUsername: string;
     ip: string;
     action: string;
+    moduleKey?: string;
     detail?: Prisma.InputJsonValue;
   }) {
     const adminId = String(params.adminId || '').trim();
@@ -178,6 +193,7 @@ export class AdminService {
         adminUsername,
         ip,
         action,
+        moduleKey: params.moduleKey?.trim() || null,
         detail: params.detail,
       },
     });
@@ -190,7 +206,9 @@ export class AdminService {
     const action = params.action?.trim();
 
     const where: Prisma.AdminSystemLogWhereInput = {
-      ...(action ? { action } : {}),
+      // Historical page-view records are intentionally excluded: an audit log
+      // should describe a state-changing administrative action, not navigation.
+      ...(action ? { action } : { action: { not: 'ADMIN_MODULE_VIEW' } }),
       ...(keyword
         ? {
             OR: [
@@ -230,6 +248,7 @@ export class AdminService {
     captchaId?: string;
     captchaCode?: string;
     ip?: string;
+    requestUrl?: string;
   }): Promise<
     | {
         ok: true;
@@ -248,11 +267,18 @@ export class AdminService {
     const password = String(params.password || '').trim();
     const ip = String(params.ip || '').trim() || 'unknown';
     if (!username || !password) {
-      return { ok: false, statusCode: 400, body: { statusCode: 400, message: '用户名或密码不能为空' } };
+      return {
+        ok: false,
+        statusCode: 400,
+        body: { statusCode: 400, message: '用户名或密码不能为空' },
+      };
     }
 
     const r = getRedisClient();
-    const adminForId = await prisma.adminUser.findUnique({ where: { username }, select: { id: true } });
+    const adminForId = await prisma.adminUser.findUnique({
+      where: { username },
+      select: { id: true },
+    });
     const adminId = adminForId?.id ?? '';
     if (adminId) await setAdminLastIp(r, adminId, ip);
     try {
@@ -261,7 +287,11 @@ export class AdminService {
         return {
           ok: false,
           statusCode: 429,
-          body: { statusCode: 429, message: '该 IP 登录失败次数过多，请稍后再试', lockUntil },
+          body: {
+            statusCode: 429,
+            message: '该 IP 登录失败次数过多，请稍后再试',
+            lockUntil,
+          },
         };
       }
 
@@ -285,7 +315,7 @@ export class AdminService {
           adminUsername: data.admin.username,
           ip,
           action: 'LOGIN',
-          detail: { username },
+          detail: { username, ...(params.requestUrl ? { requestUrl: params.requestUrl } : {}) },
         });
       }
       await clearLoginFailState(r, username, ip);
@@ -301,13 +331,24 @@ export class AdminService {
           return {
             ok: false,
             statusCode: 429,
-            body: { statusCode: 429, message: '该 IP 登录失败次数过多，请稍后再试', needCaptcha, lockUntil, failCount: count },
+            body: {
+              statusCode: 429,
+              message: '该 IP 登录失败次数过多，请稍后再试',
+              needCaptcha,
+              lockUntil,
+              failCount: count,
+            },
           };
         }
         return {
           ok: false,
           statusCode: 401,
-          body: { statusCode: 401, message: '用户名或密码错误', needCaptcha, failCount: count },
+          body: {
+            statusCode: 401,
+            message: '用户名或密码错误',
+            needCaptcha,
+            failCount: count,
+          },
         };
       }
       throw e;
@@ -325,7 +366,9 @@ export class AdminService {
   }
 
   async ensureDefaultSuperAdmin() {
-    const exists = await prisma.adminUser.findFirst({ where: { role: 'SUPERADMIN' } });
+    const exists = await prisma.adminUser.findFirst({
+      where: { role: 'SUPERADMIN' },
+    });
     if (exists) return;
 
     const username = process.env.SUPER_ADMIN_USERNAME || 'admin';
@@ -363,8 +406,12 @@ export class AdminService {
       username: admin.username,
       role: admin.role,
     } satisfies Omit<AdminTokenPayload, 'typ'>;
-    const signOpts: SignOptions = { expiresIn: expiresIn as SignOptions['expiresIn'] };
-    const refreshSignOpts: SignOptions = { expiresIn: refreshExpiresIn as SignOptions['expiresIn'] };
+    const signOpts: SignOptions = {
+      expiresIn: expiresIn as SignOptions['expiresIn'],
+    };
+    const refreshSignOpts: SignOptions = {
+      expiresIn: refreshExpiresIn as SignOptions['expiresIn'],
+    };
     const token = jwt.sign({ ...basePayload, typ: 'access' }, secret, signOpts);
     const refreshToken = jwt.sign({ ...basePayload, typ: 'refresh' }, secret, refreshSignOpts);
     const updated = await prisma.adminUser.update({
@@ -373,7 +420,14 @@ export class AdminService {
       select: adminSelect(),
     });
 
-    return { token, accessToken: token, refreshToken, expiresIn, refreshExpiresIn, admin: mapAdmin(updated) };
+    return {
+      token,
+      accessToken: token,
+      refreshToken,
+      expiresIn,
+      refreshExpiresIn,
+      admin: mapAdmin(updated),
+    };
   }
 
   async refreshToken(refreshTokenRaw: string) {
@@ -391,7 +445,10 @@ export class AdminService {
     }
     if (payload.typ !== 'refresh') throw new HttpError(401, 'refreshToken 类型错误');
 
-    const admin = await prisma.adminUser.findUnique({ where: { id: payload.sub }, select: adminSelect() });
+    const admin = await prisma.adminUser.findUnique({
+      where: { id: payload.sub },
+      select: adminSelect(),
+    });
     if (!admin) throw new HttpError(404, '管理员不存在');
     if (!admin.enabled) throw new HttpError(403, '管理员账号已停用');
 
@@ -402,12 +459,17 @@ export class AdminService {
       role: admin.role,
       typ: 'access',
     };
-    const token = jwt.sign(accessPayload, secret, { expiresIn: expiresIn as SignOptions['expiresIn'] });
+    const token = jwt.sign(accessPayload, secret, {
+      expiresIn: expiresIn as SignOptions['expiresIn'],
+    });
     return { token, accessToken: token, expiresIn, admin: mapAdmin(admin) };
   }
 
   async getMe(adminId: string) {
-    const admin = await prisma.adminUser.findUnique({ where: { id: adminId }, select: adminSelect() });
+    const admin = await prisma.adminUser.findUnique({
+      where: { id: adminId },
+      select: adminSelect(),
+    });
     if (!admin) throw new HttpError(404, '管理员不存在');
     return mapAdmin(admin);
   }
@@ -415,10 +477,17 @@ export class AdminService {
   async changeMyPassword(adminId: string, passwordRaw: string) {
     const password = String(passwordRaw || '').trim();
     if (password.length < 6) throw new HttpError(400, '密码至少 6 位');
-    const exists = await prisma.adminUser.findUnique({ where: { id: adminId }, select: { id: true } });
+    const exists = await prisma.adminUser.findUnique({
+      where: { id: adminId },
+      select: { id: true },
+    });
     if (!exists) throw new HttpError(404, '管理员不存在');
     const passwordHash = await bcrypt.hash(password, 10);
-    await prisma.adminUser.update({ where: { id: adminId }, data: { passwordHash }, select: { id: true } });
+    await prisma.adminUser.update({
+      where: { id: adminId },
+      data: { passwordHash },
+      select: { id: true },
+    });
     return { ok: true };
   }
 
@@ -427,7 +496,9 @@ export class AdminService {
     const pageSize = Math.min(Math.max(1, params.pageSize), 100);
     const keyword = params.keyword?.trim();
     const where: Prisma.UserWhereInput = keyword
-      ? { OR: [{ name: { contains: keyword } }, { openid: { contains: keyword } }] }
+      ? {
+          OR: [{ name: { contains: keyword } }, { openid: { contains: keyword } }],
+        }
       : {};
 
     const [total, rows] = await Promise.all([
@@ -492,7 +563,11 @@ export class AdminService {
       where: { id },
       data: params.enabled
         ? { enabled: true, disabledAt: null, disabledReason: null }
-        : { enabled: false, disabledAt: new Date(), disabledReason: params.reason?.trim() || null },
+        : {
+            enabled: false,
+            disabledAt: new Date(),
+            disabledReason: params.reason?.trim() || null,
+          },
       select: {
         id: true,
         enabled: true,
@@ -533,11 +608,16 @@ export class AdminService {
     });
     if (!user) return null;
 
-    const [errands, posts, items, tasks] = await Promise.all([
-      prisma.errand.count({ where: { authorId: userId, ...contentNotDeleted } }),
-      prisma.forumPost.count({ where: { authorId: userId, ...contentNotDeleted } }),
-      prisma.mallItem.count({ where: { publisherId: userId, ...contentNotDeleted } }),
-      prisma.task.count({ where: { publisherId: userId, ...contentNotDeleted } }),
+    const [posts, items, tasks] = await Promise.all([
+      prisma.forumPost.count({
+        where: { authorId: userId, ...contentNotDeleted },
+      }),
+      prisma.mallItem.count({
+        where: { publisherId: userId, ...contentNotDeleted },
+      }),
+      prisma.task.count({
+        where: { publisherId: userId, ...contentNotDeleted },
+      }),
     ]);
 
     return {
@@ -547,7 +627,7 @@ export class AdminService {
         createdAt: user.createdAt.toISOString(),
         updatedAt: user.updatedAt.toISOString(),
       },
-      stats: { errands, posts, items, tasks },
+      stats: { posts, items, tasks },
     };
   }
 
@@ -559,7 +639,11 @@ export class AdminService {
       where: { id: { in: ids } },
       select: { id: true, name: true, openid: true },
     });
-    return rows.map((r) => ({ id: r.id, name: r.name ?? '', openid: r.openid }));
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name ?? '',
+      openid: r.openid,
+    }));
   }
 
   async listAdmins(params: { page: number; pageSize: number; keyword?: string }) {
@@ -598,9 +682,15 @@ export class AdminService {
     let boundUserId: string | null = null;
     if (params.boundUserId != null && params.boundUserId.trim() !== '') {
       const uid = params.boundUserId.trim();
-      const u = await prisma.user.findUnique({ where: { id: uid }, select: { id: true } });
+      const u = await prisma.user.findUnique({
+        where: { id: uid },
+        select: { id: true },
+      });
       if (!u) throw new HttpError(400, '绑定的小程序用户不存在');
-      const occupied = await prisma.adminUser.findFirst({ where: { boundUserId: uid }, select: { id: true } });
+      const occupied = await prisma.adminUser.findFirst({
+        where: { boundUserId: uid },
+        select: { id: true },
+      });
       if (occupied) throw new HttpError(400, '该小程序用户已被其他管理员绑定');
       boundUserId = uid;
     }
@@ -650,8 +740,7 @@ export class AdminService {
     }
 
     const nextType = params.type ?? target.type;
-    const nextOrgName =
-      params.orgName === undefined ? (target.orgName ?? '') : (params.orgName?.trim() || '');
+    const nextOrgName = params.orgName === undefined ? (target.orgName ?? '') : params.orgName?.trim() || '';
     if (nextType === 'THIRD_PARTY' && !nextOrgName) {
       throw new HttpError(400, '第三方管理员请填写所属单位');
     }
@@ -662,7 +751,10 @@ export class AdminService {
       if (!raw) {
         nextBound = null;
       } else {
-        const u = await prisma.user.findUnique({ where: { id: raw }, select: { id: true } });
+        const u = await prisma.user.findUnique({
+          where: { id: raw },
+          select: { id: true },
+        });
         if (!u) throw new HttpError(400, '绑定的小程序用户不存在');
         const occupied = await prisma.adminUser.findFirst({
           where: { boundUserId: raw, id: { not: id } },
@@ -723,17 +815,21 @@ export class AdminService {
   }
 
   async listContent(
-    type: 'errands' | 'posts' | 'items' | 'tasks',
-    params: { page: number; pageSize: number; keyword?: string; visibility?: 'ONLINE' | 'OFFLINE' },
+    type: 'posts' | 'items' | 'tasks',
+    params: {
+      page: number;
+      pageSize: number;
+      keyword?: string;
+      visibility?: 'ONLINE' | 'OFFLINE';
+    },
   ) {
-    if (type === 'errands') return this.listErrands(params);
     if (type === 'posts') return this.listPosts(params);
     if (type === 'items') return this.listItems(params);
     return this.listTasks(params);
   }
 
   async updateContentState(
-    type: 'errands' | 'posts' | 'items' | 'tasks',
+    type: 'posts' | 'items' | 'tasks',
     id: string,
     params: { visibility?: 'ONLINE' | 'OFFLINE'; pinned?: boolean },
     operator: AdminOperator,
@@ -743,17 +839,6 @@ export class AdminService {
       ...(params.pinned === undefined ? {} : { pinned: params.pinned }),
     };
     if (Object.keys(data).length === 0) throw new HttpError(400, '没有可更新的字段');
-    if (type === 'errands') {
-      const row = await prisma.errand.findFirst({
-        where: { id, ...contentNotDeleted },
-        select: { authorId: true },
-      });
-      if (!row) throw new HttpError(404, '内容不存在');
-      await this.assertCanModifyContent(operator, type, row.authorId);
-      const updated = await prisma.errand.update({ where: { id }, data });
-      await invalidateErrandListCache();
-      return updated;
-    }
     if (type === 'posts') {
       const row = await prisma.forumPost.findFirst({
         where: { id, ...contentNotDeleted },
@@ -787,34 +872,14 @@ export class AdminService {
     return updated;
   }
 
-  async getContentDetail(type: 'errands' | 'posts' | 'items' | 'tasks', id: string) {
+  async getContentDetail(type: 'posts' | 'items' | 'tasks', id: string) {
     const contentId = id.trim();
     if (!contentId) throw new HttpError(400, 'id 不能为空');
 
-    if (type === 'errands') {
-      const row = await prisma.errand.findFirst({ where: { id: contentId, ...contentNotDeleted } });
-      if (!row) return null;
-      const replies = await prisma.errandReply.findMany({
-        where: { errandId: contentId },
-        orderBy: { createdAt: 'desc' },
-        take: 300,
-      });
-      return {
-        ...row,
-        statusText: this.errandStatusTextFrom(row.status),
-        replies: replies.map((r) => ({
-          id: r.id,
-          _id: r.id,
-          authorName: r.authorName ?? '',
-          content: r.content,
-          createdAt: r.createdAt.toISOString(),
-          createTime: r.createdAt.toISOString(),
-        })),
-      };
-    }
-
     if (type === 'posts') {
-      const row = await prisma.forumPost.findFirst({ where: { id: contentId, ...contentNotDeleted } });
+      const row = await prisma.forumPost.findFirst({
+        where: { id: contentId, ...contentNotDeleted },
+      });
       if (!row) return null;
       const replies = await prisma.forumReply.findMany({
         where: { postId: contentId },
@@ -843,7 +908,12 @@ export class AdminService {
         children: Node[];
       };
       const nodes = new Map<string, Node>();
-      for (const r of replies) nodes.set(r.id, { id: r.id, parentReplyId: r.parentReplyId, children: [] });
+      for (const r of replies)
+        nodes.set(r.id, {
+          id: r.id,
+          parentReplyId: r.parentReplyId,
+          children: [],
+        });
       const roots: Node[] = [];
       for (const r of replies) {
         const node = nodes.get(r.id)!;
@@ -869,6 +939,7 @@ export class AdminService {
 
       return {
         ...row,
+        authorAvatar: avatarOrDefault(row.authorAvatar),
         replies: replies.map((r) => ({
           id: r.id,
           _id: r.id,
@@ -877,9 +948,10 @@ export class AdminService {
           replyToAuthorName: r.replyToAuthorName ?? '',
           authorId: r.authorId,
           authorName: r.authorName ?? '',
+          authorAvatar: avatarOrDefault(r.authorAvatar),
           content: r.content,
-          images: Array.isArray(r.images) ? r.images : r.images ?? [],
-          videos: Array.isArray(r.videos) ? r.videos : r.videos ?? [],
+          images: Array.isArray(r.images) ? r.images : (r.images ?? []),
+          videos: Array.isArray(r.videos) ? r.videos : (r.videos ?? []),
           likeCount: r.likeCount ?? 0,
           favoriteCount: r.favoriteCount ?? 0,
           reactionCounts: reactionMap.get(r.id) ?? {},
@@ -891,25 +963,34 @@ export class AdminService {
     }
 
     if (type === 'items') {
-      const row = await prisma.mallItem.findFirst({ where: { id: contentId, ...contentNotDeleted } });
+      const row = await prisma.mallItem.findFirst({
+        where: { id: contentId, ...contentNotDeleted },
+      });
       if (!row) return null;
-      const comments = await this.mallComments.listItemComments({ itemId: contentId, userId: '__admin__' });
-      return { ...row, comments };
+      const comments = await this.mallComments.listItemComments({
+        itemId: contentId,
+        userId: '__admin__',
+      });
+      return {
+        ...row,
+        publisherAvatar: avatarOrDefault(row.publisherAvatar),
+        comments,
+      };
     }
 
-    return prisma.task.findFirst({ where: { id: contentId, ...contentNotDeleted } });
-  }
-
-  private errandStatusTextFrom(raw: string) {
-    const s = String(raw || '').trim();
-    if (s === 'PENDING_TAKE' || s === 'pending_take') return '待领取';
-    if (s === 'IN_PROGRESS' || s === 'in_progress') return '进行中';
-    if (s === 'COMPLETED' || s === 'completed') return '已完成';
-    return '';
+    const row = await prisma.task.findFirst({
+      where: { id: contentId, ...contentNotDeleted },
+    });
+    if (!row) return null;
+    return {
+      ...row,
+      publisherAvatar: avatarOrDefault(row.publisherAvatar),
+      takerAvatar: avatarOrDefault(row.takerAvatar),
+    };
   }
 
   async batchUpdateContentState(
-    type: 'errands' | 'posts' | 'items' | 'tasks',
+    type: 'posts' | 'items' | 'tasks',
     ids: string[],
     params: { visibility?: 'ONLINE' | 'OFFLINE'; pinned?: boolean },
     operator: AdminOperator,
@@ -931,36 +1012,41 @@ export class AdminService {
       });
       const bound = admin?.boundUserId?.trim();
       if (!bound) throw new HttpError(403, '未绑定小程序用户，无法批量操作');
-      if (type === 'errands') {
-        const bad = await prisma.errand.count({
-          where: { id: { in: contentIds }, ...contentNotDeleted, authorId: { not: bound } },
-        });
-        if (bad > 0) throw new HttpError(403, '批量操作中包含非本人发布的内容');
-      } else if (type === 'posts') {
+      if (type === 'posts') {
         const bad = await prisma.forumPost.count({
-          where: { id: { in: contentIds }, ...contentNotDeleted, authorId: { not: bound } },
+          where: {
+            id: { in: contentIds },
+            ...contentNotDeleted,
+            authorId: { not: bound },
+          },
         });
         if (bad > 0) throw new HttpError(403, '批量操作中包含非本人发布的内容');
       } else if (type === 'items') {
         const bad = await prisma.mallItem.count({
-          where: { id: { in: contentIds }, ...contentNotDeleted, publisherId: { not: bound } },
+          where: {
+            id: { in: contentIds },
+            ...contentNotDeleted,
+            publisherId: { not: bound },
+          },
         });
         if (bad > 0) throw new HttpError(403, '批量操作中包含非本人发布的内容');
       } else {
         const bad = await prisma.task.count({
-          where: { id: { in: contentIds }, ...contentNotDeleted, publisherId: { not: bound } },
+          where: {
+            id: { in: contentIds },
+            ...contentNotDeleted,
+            publisherId: { not: bound },
+          },
         });
         if (bad > 0) throw new HttpError(403, '批量操作中包含非本人发布的内容');
       }
     }
 
-    if (type === 'errands') {
-      const result = await prisma.errand.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
-      await invalidateErrandListCache();
-      return result;
-    }
     if (type === 'posts') {
-      const result = await prisma.forumPost.updateMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, data });
+      const result = await prisma.forumPost.updateMany({
+        where: { id: { in: contentIds }, ...contentNotDeleted },
+        data,
+      });
       await invalidateForumPostListCache();
       return result;
     }
@@ -969,10 +1055,7 @@ export class AdminService {
         where: { id: { in: contentIds }, ...contentNotDeleted },
         data,
       });
-      await Promise.all([
-        invalidateMallItemsListCache(),
-        ...contentIds.map((id) => invalidateMallItemDetailCache(id)),
-      ]);
+      await Promise.all([invalidateMallItemsListCache(), ...contentIds.map((id) => invalidateMallItemDetailCache(id))]);
       return result;
     }
     const result = await prisma.task.updateMany({
@@ -996,67 +1079,110 @@ export class AdminService {
     };
   }
 
-  private async listErrands(params: { page: number; pageSize: number; keyword?: string; visibility?: 'ONLINE' | 'OFFLINE' }) {
-    const keyword = params.keyword?.trim();
-    const where: Prisma.ErrandWhereInput = {
-      ...this.visibilityWhere(params.visibility),
-      ...(keyword ? { OR: [{ title: { contains: keyword } }, { content: { contains: keyword } }] } : {}),
-    };
-    const [total, rows] = await Promise.all([
-      prisma.errand.count({ where }),
-      prisma.errand.findMany({ where, orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }], ...this.pageArgs(params) }),
-    ]);
-    return { total, list: rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })) };
-  }
-
-  private async listPosts(params: { page: number; pageSize: number; keyword?: string; visibility?: 'ONLINE' | 'OFFLINE' }) {
+  private async listPosts(params: {
+    page: number;
+    pageSize: number;
+    keyword?: string;
+    visibility?: 'ONLINE' | 'OFFLINE';
+  }) {
     const keyword = params.keyword?.trim();
     const where: Prisma.ForumPostWhereInput = {
       ...this.visibilityWhere(params.visibility),
-      ...(keyword ? { OR: [{ title: { contains: keyword } }, { content: { contains: keyword } }] } : {}),
+      ...(keyword
+        ? {
+            OR: [{ title: { contains: keyword } }, { content: { contains: keyword } }],
+          }
+        : {}),
     };
     const [total, rows] = await Promise.all([
       prisma.forumPost.count({ where }),
-      prisma.forumPost.findMany({ where, orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }], ...this.pageArgs(params) }),
+      prisma.forumPost.findMany({
+        where,
+        orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
+        ...this.pageArgs(params),
+      }),
     ]);
     return {
       total,
       list: rows.map((row) => ({
         ...row,
+        authorAvatar: avatarOrDefault(row.authorAvatar),
         createdAt: row.createdAt.toISOString(),
         validUntil: row.validUntil ? row.validUntil.toISOString() : null,
       })),
     };
   }
 
-  private async listItems(params: { page: number; pageSize: number; keyword?: string; visibility?: 'ONLINE' | 'OFFLINE' }) {
+  private async listItems(params: {
+    page: number;
+    pageSize: number;
+    keyword?: string;
+    visibility?: 'ONLINE' | 'OFFLINE';
+  }) {
     const keyword = params.keyword?.trim();
     const where: Prisma.MallItemWhereInput = {
       ...this.visibilityWhere(params.visibility),
-      ...(keyword ? { OR: [{ title: { contains: keyword } }, { desc: { contains: keyword } }] } : {}),
+      ...(keyword
+        ? {
+            OR: [{ title: { contains: keyword } }, { desc: { contains: keyword } }],
+          }
+        : {}),
     };
     const [total, rows] = await Promise.all([
       prisma.mallItem.count({ where }),
-      prisma.mallItem.findMany({ where, orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }], ...this.pageArgs(params) }),
+      prisma.mallItem.findMany({
+        where,
+        orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
+        ...this.pageArgs(params),
+      }),
     ]);
-    return { total, list: rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })) };
+    return {
+      total,
+      list: rows.map((row) => ({
+        ...row,
+        publisherAvatar: avatarOrDefault(row.publisherAvatar),
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+    };
   }
 
-  private async listTasks(params: { page: number; pageSize: number; keyword?: string; visibility?: 'ONLINE' | 'OFFLINE' }) {
+  private async listTasks(params: {
+    page: number;
+    pageSize: number;
+    keyword?: string;
+    visibility?: 'ONLINE' | 'OFFLINE';
+  }) {
     const keyword = params.keyword?.trim();
     const where: Prisma.TaskWhereInput = {
       ...this.visibilityWhere(params.visibility),
-      ...(keyword ? { OR: [{ title: { contains: keyword } }, { desc: { contains: keyword } }] } : {}),
+      ...(keyword
+        ? {
+            OR: [{ title: { contains: keyword } }, { desc: { contains: keyword } }],
+          }
+        : {}),
     };
     const [total, rows] = await Promise.all([
       prisma.task.count({ where }),
-      prisma.task.findMany({ where, orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }], ...this.pageArgs(params) }),
+      prisma.task.findMany({
+        where,
+        orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
+        ...this.pageArgs(params),
+      }),
     ]);
-    return { total, list: rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })) };
+    return {
+      total,
+      list: rows.map((row) => ({
+        ...row,
+        publisherAvatar: avatarOrDefault(row.publisherAvatar),
+        takerAvatar: avatarOrDefault(row.takerAvatar),
+        createdAt: row.createdAt.toISOString(),
+      })),
+    };
   }
 
   private contentOwnerUserId(
-    type: 'errands' | 'posts' | 'items' | 'tasks',
+    type: 'posts' | 'items' | 'tasks',
     row: { authorId?: string | null; publisherId?: string | null },
   ): string {
     if (type === 'items' || type === 'tasks') return String(row.publisherId ?? '');
@@ -1065,7 +1191,7 @@ export class AdminService {
 
   private async assertCanModifyContent(
     operator: AdminOperator,
-    type: 'errands' | 'posts' | 'items' | 'tasks',
+    type: 'posts' | 'items' | 'tasks',
     ownerUserId: string,
   ) {
     if (operator.role === 'SUPERADMIN') return;
@@ -1099,15 +1225,15 @@ export class AdminService {
     if (want && want !== bound) {
       throw new HttpError(403, '只能以本人绑定的小程序用户身份发布');
     }
-    const u = await prisma.user.findUnique({ where: { id: bound }, select: { id: true } });
+    const u = await prisma.user.findUnique({
+      where: { id: bound },
+      select: { id: true },
+    });
     if (!u) throw new HttpError(400, '管理员绑定的用户不存在，请重新绑定');
     return bound;
   }
 
-  private async assertNonSuperCannotTransferPublisher(
-    operator: AdminOperator,
-    dtoActorUserId?: string,
-  ) {
+  private async assertNonSuperCannotTransferPublisher(operator: AdminOperator, dtoActorUserId?: string) {
     if (operator.role === 'SUPERADMIN' || dtoActorUserId === undefined) return;
     const want = dtoActorUserId.trim();
     const admin = await prisma.adminUser.findUnique({
@@ -1123,17 +1249,26 @@ export class AdminService {
   private async resolveActorUserId(actorUserId?: string | null) {
     const trimmed = actorUserId?.trim();
     if (trimmed) {
-      const u = await prisma.user.findUnique({ where: { id: trimmed }, select: { id: true } });
+      const u = await prisma.user.findUnique({
+        where: { id: trimmed },
+        select: { id: true },
+      });
       if (!u) throw new HttpError(400, '指定的小程序用户不存在');
       return trimmed;
     }
     const envId = process.env.ADMIN_CONTENT_DEFAULT_USER_ID?.trim();
     if (envId) {
-      const u = await prisma.user.findUnique({ where: { id: envId }, select: { id: true } });
+      const u = await prisma.user.findUnique({
+        where: { id: envId },
+        select: { id: true },
+      });
       if (!u) throw new HttpError(500, 'ADMIN_CONTENT_DEFAULT_USER_ID 对应用户不存在');
       return envId;
     }
-    const first = await prisma.user.findFirst({ orderBy: { createdAt: 'asc' }, select: { id: true } });
+    const first = await prisma.user.findFirst({
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
     if (!first) throw new HttpError(400, '库中无小程序用户，请在请求中传入 actorUserId（发布者用户 id）');
     return first.id;
   }
@@ -1143,7 +1278,7 @@ export class AdminService {
   }
 
   async createContent(
-    type: 'errands' | 'posts' | 'items' | 'tasks',
+    type: 'posts' | 'items' | 'tasks',
     dto: AdminCreateContentDto,
     operator: AdminOperator,
   ) {
@@ -1156,176 +1291,165 @@ export class AdminService {
     });
     const adminLabel = op ? adminDisplayLabelForContent(op) : '网站管理员';
 
-    if (type === 'errands') {
-      const title = (dto.title || '').trim();
-      const content = (dto.content || '').trim();
-      if (!title) throw new HttpError(400, '请输入标题');
-      if (!content) throw new HttpError(400, '请输入内容');
-      const rewardParsed = parseRewardYuan(dto.reward || '');
-      if ('error' in rewardParsed) throw new HttpError(400, rewardParsed.error);
-      const author = await prisma.user.findUnique({ where: { id: actorId }, select: { name: true } });
-      const images = parseStrictMediaUrlList(dto.images, MAX_ERRAND_IMAGES, 'image', 'images');
-      const videos = parseStrictMediaUrlList(dto.videos, MAX_ERRAND_VIDEOS, 'video', 'videos');
-      const row = await prisma.errand.create({
-        data: {
-          title,
-          content,
-          reward: rewardParsed.value,
-          status: 'PENDING_TAKE',
-          authorId: actorId,
-          authorName: author?.name ?? '',
-          adminLabel,
-          createdByAdminId: operator.adminId,
-          images: images.length ? jsonMedia(images) : undefined,
-          videos: videos.length ? jsonMedia(videos) : undefined,
-          visibility: vis,
-          pinned: pin,
-        },
-      });
-      await invalidateErrandListCache();
-      return {
-        ...row,
-        createdAt: row.createdAt.toISOString(),
-        claimedAt: row.claimedAt ? row.claimedAt.toISOString() : null,
-        completedAt: row.completedAt ? row.completedAt.toISOString() : null,
-      };
-    }
-
-    if (type === 'posts') {
-      const title = (dto.title || '').trim();
-      const content = (dto.content || '').trim();
-      const postType = parseForumPostType(dto.postType);
-      const validUntil = parseAnnouncementValidUntil(dto.validUntil, postType);
-      const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
-      const videos = parseStrictMediaUrlList(dto.videos, MAX_POST_VIDEOS, 'video', 'videos');
-      if (!title) throw new HttpError(400, '请输入标题');
-      if (!content && images.length === 0 && videos.length === 0) {
-        throw new HttpError(400, '请输入内容或添加图片/视频');
+    return runAdminContentMutation(prisma, async (tx) => {
+      await lockUsersForProfileSnapshot(tx, [actorId]);
+      if (type === 'posts') {
+        const title = (dto.title || '').trim();
+        const content = (dto.content || '').trim();
+        const postType = parseForumPostType(dto.postType);
+        const validUntil = parseAnnouncementValidUntil(dto.validUntil, postType);
+        const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
+        const videos = parseStrictMediaUrlList(dto.videos, MAX_POST_VIDEOS, 'video', 'videos');
+        if (!title) throw new HttpError(400, '请输入标题');
+        if (!content && images.length === 0 && videos.length === 0) {
+          throw new HttpError(400, '请输入内容或添加图片/视频');
+        }
+        const author = await tx.user.findUnique({
+          where: { id: actorId },
+          select: { name: true, avatar: true, identityType: true },
+        });
+        const row = await tx.forumPost.create({
+          data: {
+            title,
+            content,
+            images: images.length ? jsonMedia(images) : undefined,
+            videos: videos.length ? jsonMedia(videos) : undefined,
+            authorId: actorId,
+            authorName: author?.name ?? '',
+            authorAvatar: author?.avatar ?? null,
+            authorIdentity: author?.identityType ?? null,
+            adminLabel,
+            createdByAdminId: operator.adminId,
+            postType,
+            validUntil,
+            visibility: vis,
+            pinned: pin,
+          },
+        });
+        return {
+          result: {
+            ...row,
+            createdAt: row.createdAt.toISOString(),
+            validUntil: row.validUntil ? row.validUntil.toISOString() : null,
+          },
+          invalidations: [{ kind: 'forum-list' }],
+        };
       }
-      const author = await prisma.user.findUnique({
-        where: { id: actorId },
-        select: { name: true, avatar: true },
-      });
-      const row = await prisma.forumPost.create({
-        data: {
-          title,
-          content,
-          images: images.length ? jsonMedia(images) : undefined,
-          videos: videos.length ? jsonMedia(videos) : undefined,
-          authorId: actorId,
-          authorName: author?.name ?? '',
-          authorAvatar: author?.avatar ?? null,
-          adminLabel,
-          createdByAdminId: operator.adminId,
-          postType,
-          validUntil,
-          visibility: vis,
-          pinned: pin,
-        },
-      });
-      await invalidateForumPostListCache();
-      return {
-        ...row,
-        createdAt: row.createdAt.toISOString(),
-        validUntil: row.validUntil ? row.validUntil.toISOString() : null,
-      };
-    }
 
-    if (type === 'items') {
-      const categoryId = await this.assertMallCategoryId(dto.categoryId || '');
+      if (type === 'items') {
+        const categoryId = await this.assertMallCategoryId(dto.categoryId || '');
+        const title = (dto.title || '').trim();
+        const desc = (dto.desc || '').trim();
+        if (!title) throw new HttpError(400, '请输入标题');
+        if (!desc) throw new HttpError(400, '请输入描述');
+        const legacyImages = parseStrictMediaUrlList(dto.images, 9, 'image', 'images');
+        const mainImages = parseStrictMediaUrlList(dto.mainImages, 1, 'image', 'mainImages');
+        const subImages = parseStrictMediaUrlList(dto.subImages, 6, 'image', 'subImages');
+        const videos = parseStrictMediaUrlList(dto.videos, 2, 'video', 'videos');
+        const normalizedMainImages = mainImages.length ? mainImages : legacyImages.slice(0, 1);
+        const normalizedSubImages = mainImages.length ? subImages : legacyImages.slice(1, 6);
+        if (normalizedMainImages.length + normalizedSubImages.length > 6) {
+          throw new HttpError(400, '图片最多 6 张（主图+副图合计）');
+        }
+        const publisher = await tx.user.findUnique({
+          where: { id: actorId },
+          select: { name: true, avatar: true },
+        });
+        const row = await tx.mallItem.create({
+          data: {
+            categoryId,
+            title,
+            price: dto.price?.trim() || null,
+            unit: (dto.unit?.trim() || '元').slice(0, 16),
+            desc,
+            contact: dto.contact?.trim() || null,
+            locationName: dto.locationName?.trim() || null,
+            locationAddress: dto.locationAddress?.trim() || null,
+            latitude: Number.isFinite(dto.latitude) ? dto.latitude : null,
+            longitude: Number.isFinite(dto.longitude) ? dto.longitude : null,
+            mainImages: normalizedMainImages.length ? jsonImages(normalizedMainImages) : undefined,
+            subImages: normalizedSubImages.length ? jsonImages(normalizedSubImages) : undefined,
+            videos: videos.length ? jsonImages(videos) : undefined,
+            images: legacyImages.length ? jsonImages(legacyImages) : undefined,
+            publisherId: actorId,
+            publisherName: publisher?.name ?? '',
+            publisherAvatar: publisher?.avatar ?? null,
+            adminLabel,
+            createdByAdminId: operator.adminId,
+            visibility: vis,
+            pinned: pin,
+          },
+        });
+        return {
+          result: {
+            ...row,
+            createdAt: row.createdAt.toISOString(),
+            updatedAt: row.updatedAt.toISOString(),
+          },
+          invalidations: [{ kind: 'mall-list' }],
+        };
+      }
+
       const title = (dto.title || '').trim();
       const desc = (dto.desc || '').trim();
-      if (!title) throw new HttpError(400, '请输入标题');
-      if (!desc) throw new HttpError(400, '请输入描述');
-      const legacyImages = parseStrictMediaUrlList(dto.images, 9, 'image', 'images');
-      const mainImages = parseStrictMediaUrlList(dto.mainImages, 1, 'image', 'mainImages');
-      const subImages = parseStrictMediaUrlList(dto.subImages, 6, 'image', 'subImages');
-      const videos = parseStrictMediaUrlList(dto.videos, 2, 'video', 'videos');
-      const normalizedMainImages = mainImages.length ? mainImages : legacyImages.slice(0, 1);
-      const normalizedSubImages = mainImages.length ? subImages : legacyImages.slice(1, 6);
-      if (normalizedMainImages.length + normalizedSubImages.length > 6) {
-        throw new HttpError(400, '图片最多 6 张（主图+副图合计）');
+      const reward = (dto.reward || '').trim();
+      const location = (dto.location || '').trim();
+      if (!title) throw new HttpError(400, 'title 不能为空');
+      if (reward && (Number.isNaN(Number(reward)) || Number(reward) < 0)) {
+        throw new HttpError(400, '感谢金金额无效');
       }
-      const row = await prisma.mallItem.create({
+      const images = parseStrictMediaUrlList(dto.images, MAX_TASK_IMAGES, 'image', 'images');
+      const videos = parseStrictMediaUrlList(dto.videos, MAX_TASK_VIDEOS, 'video', 'videos');
+      if (!desc && images.length === 0 && videos.length === 0) {
+        throw new HttpError(400, 'desc 与图片/视频至少填一项');
+      }
+      const publisher = await tx.user.findUnique({
+        where: { id: actorId },
+        select: { name: true, avatar: true, identityType: true },
+      });
+      const row = await tx.task.create({
         data: {
-          categoryId,
           title,
-          price: dto.price?.trim() || null,
-          unit: (dto.unit?.trim() || '元').slice(0, 16),
           desc,
-          contact: dto.contact?.trim() || null,
-          locationName: dto.locationName?.trim() || null,
-          locationAddress: dto.locationAddress?.trim() || null,
-          latitude: Number.isFinite(dto.latitude) ? dto.latitude : null,
-          longitude: Number.isFinite(dto.longitude) ? dto.longitude : null,
-          mainImages: normalizedMainImages.length ? jsonImages(normalizedMainImages) : undefined,
-          subImages: normalizedSubImages.length ? jsonImages(normalizedSubImages) : undefined,
-          videos: videos.length ? jsonImages(videos) : undefined,
-          images: legacyImages.length ? jsonImages(legacyImages) : undefined,
+          reward,
+          location: location || '',
+          images,
+          videos,
+          status: 'PENDING_TAKE',
           publisherId: actorId,
+          publisherName: publisher?.name ?? '',
+          publisherAvatar: publisher?.avatar ?? null,
+          publisherIdentity: publisher?.identityType ?? null,
           adminLabel,
           createdByAdminId: operator.adminId,
           visibility: vis,
           pinned: pin,
         },
       });
-      await invalidateMallItemsListCache();
       return {
-        ...row,
-        createdAt: row.createdAt.toISOString(),
-        updatedAt: row.updatedAt.toISOString(),
+        result: {
+          ...row,
+          createdAt: row.createdAt.toISOString(),
+          claimedAt: row.claimedAt ? row.claimedAt.toISOString() : null,
+          completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+          confirmedAt: row.confirmedAt ? row.confirmedAt.toISOString() : null,
+        },
+        invalidations: [{ kind: 'task-list' }],
       };
-    }
-
-    const title = (dto.title || '').trim();
-    const desc = (dto.desc || '').trim();
-    const reward = (dto.reward || '').trim();
-    const location = (dto.location || '').trim();
-    if (!title) throw new HttpError(400, 'title 不能为空');
-    if (reward && (Number.isNaN(Number(reward)) || Number(reward) < 0)) {
-      throw new HttpError(400, '感谢金金额无效');
-    }
-    const images = parseStrictMediaUrlList(dto.images, MAX_TASK_IMAGES, 'image', 'images');
-    const videos = parseStrictMediaUrlList(dto.videos, MAX_TASK_VIDEOS, 'video', 'videos');
-    if (!desc && images.length === 0 && videos.length === 0) {
-      throw new HttpError(400, 'desc 与图片/视频至少填一项');
-    }
-    const publisher = await prisma.user.findUnique({ where: { id: actorId }, select: { name: true } });
-    const row = await prisma.task.create({
-      data: {
-        title,
-        desc,
-        reward,
-        location: location || '',
-        images,
-        videos,
-        status: 'PENDING_TAKE',
-        publisherId: actorId,
-        publisherName: publisher?.name ?? '',
-        adminLabel,
-        createdByAdminId: operator.adminId,
-        visibility: vis,
-        pinned: pin,
-      },
     });
-    await invalidatePendingTasksListCache();
-    return {
-      ...row,
-      createdAt: row.createdAt.toISOString(),
-      claimedAt: row.claimedAt ? row.claimedAt.toISOString() : null,
-      completedAt: row.completedAt ? row.completedAt.toISOString() : null,
-      confirmedAt: row.confirmedAt ? row.confirmedAt.toISOString() : null,
-    };
   }
 
   async updateContentFields(
-    type: 'errands' | 'posts' | 'items' | 'tasks',
+    type: 'posts' | 'items' | 'tasks',
     idRaw: string,
     dto: AdminUpdateContentDto,
     operator: AdminOperator,
   ) {
     const id = idRaw.trim();
     if (!id) throw new HttpError(400, 'id 不能为空');
+    if (type === 'tasks' && dto.status !== undefined) {
+      throw new HttpError(400, '任务状态不能通过内容编辑修改');
+    }
 
     const touched =
       dto.actorUserId !== undefined ||
@@ -1350,241 +1474,219 @@ export class AdminService {
     if (!touched) throw new HttpError(400, '没有可更新的字段');
 
     await this.assertNonSuperCannotTransferPublisher(operator, dto.actorUserId);
+    const actorId = dto.actorUserId !== undefined ? await this.resolveActorUserId(dto.actorUserId) : null;
 
-    if (type === 'errands') {
-      const existing = await prisma.errand.findFirst({ where: { id, ...contentNotDeleted } });
-      if (!existing) throw new HttpError(404, '内容不存在');
-      await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
-      const data: Prisma.ErrandUpdateInput = {};
-      if (dto.title !== undefined) data.title = dto.title.trim();
-      if (dto.content !== undefined) data.content = dto.content.trim();
-      if (dto.reward !== undefined) {
-        const rewardParsed = parseRewardYuan(dto.reward);
-        if ('error' in rewardParsed) throw new HttpError(400, rewardParsed.error);
-        data.reward = rewardParsed.value;
-      }
-      if (dto.visibility !== undefined) data.visibility = dto.visibility;
-      if (dto.pinned !== undefined) data.pinned = dto.pinned;
-      if (dto.images !== undefined) {
-        const images = parseStrictMediaUrlList(dto.images, MAX_ERRAND_IMAGES, 'image', 'images');
-        data.images = jsonMedia(images);
-      }
-      if (dto.videos !== undefined) {
-        const videos = parseStrictMediaUrlList(dto.videos, MAX_ERRAND_VIDEOS, 'video', 'videos');
-        data.videos = jsonMedia(videos);
-      }
-      if (dto.status !== undefined) {
-        const st = dto.status.trim() as ErrandStatus;
-        if (!ERRAND_STATUS_SET.has(st)) throw new HttpError(400, '无效的跑腿状态');
-        data.status = st;
-        if (st === 'PENDING_TAKE' && existing.status !== 'PENDING_TAKE') {
-          data.claimerId = null;
-          data.claimerName = null;
-          data.claimedAt = null;
-        }
-      }
-      if (dto.actorUserId !== undefined) {
-        const aid = await this.resolveActorUserId(dto.actorUserId);
-        const author = await prisma.user.findUnique({ where: { id: aid }, select: { name: true } });
-        data.authorId = aid;
-        data.authorName = author?.name ?? '';
-      }
-      const row = await prisma.errand.update({ where: { id }, data });
-      await Promise.all([invalidateErrandListCache(), invalidateErrandRepliesCache(id)]);
-      return {
-        ...row,
-        createdAt: row.createdAt.toISOString(),
-        claimedAt: row.claimedAt ? row.claimedAt.toISOString() : null,
-        completedAt: row.completedAt ? row.completedAt.toISOString() : null,
-      };
-    }
-
-    if (type === 'posts') {
-      const existing = await prisma.forumPost.findFirst({ where: { id, ...contentNotDeleted } });
-      if (!existing) throw new HttpError(404, '内容不存在');
-      await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
-      const data: Prisma.ForumPostUpdateInput = {};
-      if (dto.title !== undefined) data.title = dto.title.trim();
-      if (dto.content !== undefined) data.content = dto.content.trim();
-      if (dto.visibility !== undefined) data.visibility = dto.visibility;
-      if (dto.pinned !== undefined) data.pinned = dto.pinned;
-      if (dto.postType !== undefined || dto.validUntil !== undefined) {
-        const nextPostType =
-          dto.postType !== undefined ? parseForumPostType(dto.postType) : (existing.postType as 'NORMAL' | 'ANNOUNCEMENT');
-        data.postType = nextPostType;
-        data.validUntil =
-          nextPostType === 'ANNOUNCEMENT'
-            ? parseAnnouncementValidUntil(dto.validUntil ?? existing.validUntil?.toISOString(), nextPostType)
-            : null;
-      }
-      if (dto.images !== undefined) {
-        const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
-        data.images = jsonMedia(images);
-      }
-      if (dto.videos !== undefined) {
-        const videos = parseStrictMediaUrlList(dto.videos, MAX_POST_VIDEOS, 'video', 'videos');
-        data.videos = jsonMedia(videos);
-      }
-      if (dto.actorUserId !== undefined) {
-        const aid = await this.resolveActorUserId(dto.actorUserId);
-        const author = await prisma.user.findUnique({
-          where: { id: aid },
-          select: { name: true, avatar: true },
+    return runAdminContentMutation(prisma, async (tx) => {
+      if (actorId) await lockUsersForProfileSnapshot(tx, [actorId]);
+      if (type === 'posts') {
+        const existing = await tx.forumPost.findFirst({
+          where: { id, ...contentNotDeleted },
         });
-        data.authorId = aid;
-        data.authorName = author?.name ?? '';
-        data.authorAvatar = author?.avatar ?? null;
+        if (!existing) throw new HttpError(404, '内容不存在');
+        await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
+        const data: Prisma.ForumPostUpdateInput = {};
+        if (dto.title !== undefined) data.title = dto.title.trim();
+        if (dto.content !== undefined) data.content = dto.content.trim();
+        if (dto.visibility !== undefined) data.visibility = dto.visibility;
+        if (dto.pinned !== undefined) data.pinned = dto.pinned;
+        if (dto.postType !== undefined || dto.validUntil !== undefined) {
+          const nextPostType =
+            dto.postType !== undefined
+              ? parseForumPostType(dto.postType)
+              : (existing.postType as 'NORMAL' | 'ANNOUNCEMENT');
+          data.postType = nextPostType;
+          data.validUntil =
+            nextPostType === 'ANNOUNCEMENT'
+              ? parseAnnouncementValidUntil(dto.validUntil ?? existing.validUntil?.toISOString(), nextPostType)
+              : null;
+        }
+        if (dto.images !== undefined) {
+          const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
+          data.images = jsonMedia(images);
+        }
+        if (dto.videos !== undefined) {
+          const videos = parseStrictMediaUrlList(dto.videos, MAX_POST_VIDEOS, 'video', 'videos');
+          data.videos = jsonMedia(videos);
+        }
+        if (dto.actorUserId !== undefined) {
+          const author = await tx.user.findUnique({
+            where: { id: actorId! },
+            select: { name: true, avatar: true, identityType: true },
+          });
+          data.authorId = actorId!;
+          data.authorName = author?.name ?? '';
+          data.authorAvatar = author?.avatar ?? null;
+          data.authorIdentity = author?.identityType ?? null;
+        }
+        const row = await tx.forumPost.update({ where: { id }, data });
+        return {
+          result: {
+            ...row,
+            createdAt: row.createdAt.toISOString(),
+            validUntil: row.validUntil ? row.validUntil.toISOString() : null,
+          },
+          invalidations: [
+            { kind: 'forum-list' },
+            { kind: 'forum-replies', id },
+          ],
+        };
       }
-      const row = await prisma.forumPost.update({ where: { id }, data });
-      await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
-      return {
-        ...row,
-        createdAt: row.createdAt.toISOString(),
-        validUntil: row.validUntil ? row.validUntil.toISOString() : null,
-      };
-    }
 
-    if (type === 'items') {
-      const existing = await prisma.mallItem.findFirst({ where: { id, ...contentNotDeleted } });
+      if (type === 'items') {
+        const existing = await tx.mallItem.findFirst({
+          where: { id, ...contentNotDeleted },
+        });
+        if (!existing) throw new HttpError(404, '内容不存在');
+        await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
+        const data: Prisma.MallItemUpdateInput = {};
+        if (dto.categoryId !== undefined) data.categoryId = await this.assertMallCategoryId(dto.categoryId);
+        if (dto.title !== undefined) data.title = dto.title.trim();
+        if (dto.desc !== undefined) data.desc = dto.desc.trim();
+        if (dto.price !== undefined) data.price = dto.price.trim() || null;
+        if (dto.unit !== undefined) data.unit = (dto.unit.trim() || '元').slice(0, 16);
+        if (dto.contact !== undefined) data.contact = dto.contact.trim() || null;
+        if (dto.locationName !== undefined) data.locationName = dto.locationName.trim() || null;
+        if (dto.locationAddress !== undefined) data.locationAddress = dto.locationAddress.trim() || null;
+        if (dto.latitude !== undefined) data.latitude = Number.isFinite(dto.latitude) ? dto.latitude : null;
+        if (dto.longitude !== undefined) data.longitude = Number.isFinite(dto.longitude) ? dto.longitude : null;
+        if (dto.visibility !== undefined) data.visibility = dto.visibility;
+        if (dto.pinned !== undefined) data.pinned = dto.pinned;
+        if (dto.actorUserId !== undefined) {
+          const publisher = await tx.user.findUnique({
+            where: { id: actorId! },
+            select: { name: true, avatar: true },
+          });
+          data.publisherId = actorId!;
+          data.publisherName = publisher?.name ?? '';
+          data.publisherAvatar = publisher?.avatar ?? null;
+        }
+        if (dto.images !== undefined || dto.mainImages !== undefined || dto.subImages !== undefined) {
+          const legacyImages = parseStrictMediaUrlList(
+            dto.images !== undefined ? dto.images : [],
+            9,
+            'image',
+            'images',
+          );
+          const mainImages = parseStrictMediaUrlList(
+            dto.mainImages !== undefined ? dto.mainImages : [],
+            1,
+            'image',
+            'mainImages',
+          );
+          const subImages = parseStrictMediaUrlList(
+            dto.subImages !== undefined ? dto.subImages : [],
+            6,
+            'image',
+            'subImages',
+          );
+          let normMain: string[];
+          let normSub: string[];
+          if (dto.mainImages !== undefined || dto.subImages !== undefined) {
+            normMain = mainImages.length ? mainImages : legacyImages.slice(0, 1);
+            normSub = subImages.length ? subImages : legacyImages.slice(1, 6);
+          } else {
+            const curMain = Array.isArray(existing.mainImages) ? (existing.mainImages as string[]) : [];
+            const curSub = Array.isArray(existing.subImages) ? (existing.subImages as string[]) : [];
+            const curLegacy = Array.isArray(existing.images) ? (existing.images as string[]) : [];
+            const baseMain = curMain.length ? curMain : curLegacy.slice(0, 1);
+            const baseSub = curSub.length ? curSub : curLegacy.slice(1, 6);
+            normMain = legacyImages.length ? legacyImages.slice(0, 1) : baseMain;
+            normSub = legacyImages.length > 1 ? legacyImages.slice(1, 6) : baseSub;
+          }
+          if (normMain.length + normSub.length > 6) throw new HttpError(400, '图片最多 6 张（主图+副图合计）');
+          data.mainImages = normMain.length ? jsonImages(normMain) : [];
+          data.subImages = normSub.length ? jsonImages(normSub) : [];
+          if (dto.images !== undefined) data.images = legacyImages.length ? jsonImages(legacyImages) : [];
+        }
+        if (dto.videos !== undefined) {
+          const videos = parseStrictMediaUrlList(dto.videos, 2, 'video', 'videos');
+          data.videos = videos.length ? jsonImages(videos) : [];
+        }
+        const row = await tx.mallItem.update({ where: { id }, data });
+        return {
+          result: {
+            ...row,
+            createdAt: row.createdAt.toISOString(),
+            updatedAt: row.updatedAt.toISOString(),
+          },
+          invalidations: [
+            { kind: 'mall-list' },
+            { kind: 'mall-item', id },
+          ],
+        };
+      }
+
+      const existing = await tx.task.findFirst({
+        where: { id, ...contentNotDeleted },
+      });
       if (!existing) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
-      const data: Prisma.MallItemUpdateInput = {};
-      if (dto.categoryId !== undefined) data.categoryId = await this.assertMallCategoryId(dto.categoryId);
+      const data: Prisma.TaskUpdateInput = {};
       if (dto.title !== undefined) data.title = dto.title.trim();
       if (dto.desc !== undefined) data.desc = dto.desc.trim();
-      if (dto.price !== undefined) data.price = dto.price.trim() || null;
-      if (dto.unit !== undefined) data.unit = (dto.unit.trim() || '元').slice(0, 16);
-      if (dto.contact !== undefined) data.contact = dto.contact.trim() || null;
-      if (dto.locationName !== undefined) data.locationName = dto.locationName.trim() || null;
-      if (dto.locationAddress !== undefined) data.locationAddress = dto.locationAddress.trim() || null;
-      if (dto.latitude !== undefined) data.latitude = Number.isFinite(dto.latitude) ? dto.latitude : null;
-      if (dto.longitude !== undefined) data.longitude = Number.isFinite(dto.longitude) ? dto.longitude : null;
+      if (dto.reward !== undefined) data.reward = dto.reward.trim();
+      if (dto.location !== undefined) data.location = dto.location.trim();
       if (dto.visibility !== undefined) data.visibility = dto.visibility;
       if (dto.pinned !== undefined) data.pinned = dto.pinned;
-      if (dto.actorUserId !== undefined) {
-        const aid = await this.resolveActorUserId(dto.actorUserId);
-        data.publisherId = aid;
-      }
-      if (dto.images !== undefined || dto.mainImages !== undefined || dto.subImages !== undefined) {
-        const legacyImages = parseStrictMediaUrlList(
-          dto.images !== undefined ? dto.images : [],
-          9,
-          'image',
-          'images',
-        );
-        const mainImages = parseStrictMediaUrlList(
-          dto.mainImages !== undefined ? dto.mainImages : [],
-          1,
-          'image',
-          'mainImages',
-        );
-        const subImages = parseStrictMediaUrlList(
-          dto.subImages !== undefined ? dto.subImages : [],
-          6,
-          'image',
-          'subImages',
-        );
-        let normMain: string[];
-        let normSub: string[];
-        if (dto.mainImages !== undefined || dto.subImages !== undefined) {
-          normMain = mainImages.length ? mainImages : legacyImages.slice(0, 1);
-          normSub = subImages.length ? subImages : legacyImages.slice(1, 6);
-        } else {
-          const curMain = Array.isArray(existing.mainImages)
-            ? (existing.mainImages as string[])
-            : [];
-          const curSub = Array.isArray(existing.subImages) ? (existing.subImages as string[]) : [];
-          const curLegacy = Array.isArray(existing.images) ? (existing.images as string[]) : [];
-          const baseMain = curMain.length ? curMain : curLegacy.slice(0, 1);
-          const baseSub = curSub.length ? curSub : curLegacy.slice(1, 6);
-          normMain = legacyImages.length ? legacyImages.slice(0, 1) : baseMain;
-          normSub = legacyImages.length > 1 ? legacyImages.slice(1, 6) : baseSub;
-        }
-        if (normMain.length + normSub.length > 6) throw new HttpError(400, '图片最多 6 张（主图+副图合计）');
-        data.mainImages = normMain.length ? jsonImages(normMain) : [];
-        data.subImages = normSub.length ? jsonImages(normSub) : [];
-        if (dto.images !== undefined) data.images = legacyImages.length ? jsonImages(legacyImages) : [];
+      if (dto.images !== undefined) {
+        data.images = parseStrictMediaUrlList(dto.images, MAX_TASK_IMAGES, 'image', 'images');
       }
       if (dto.videos !== undefined) {
-        const videos = parseStrictMediaUrlList(dto.videos, 2, 'video', 'videos');
-        data.videos = videos.length ? jsonImages(videos) : [];
+        data.videos = parseStrictMediaUrlList(dto.videos, MAX_TASK_VIDEOS, 'video', 'videos');
       }
-      const row = await prisma.mallItem.update({ where: { id }, data });
-      await Promise.all([invalidateMallItemsListCache(), invalidateMallItemDetailCache(id)]);
+      if (dto.actorUserId !== undefined) {
+        const publisher = await tx.user.findUnique({
+          where: { id: actorId! },
+          select: { name: true, avatar: true, identityType: true },
+        });
+        data.publisherId = actorId!;
+        data.publisherName = publisher?.name ?? '';
+        data.publisherAvatar = publisher?.avatar ?? null;
+        data.publisherIdentity = publisher?.identityType ?? null;
+      }
+      const row = await updateAdminTaskContentCas(tx, {
+        id,
+        publisherId: existing.publisherId,
+        status: existing.status,
+        version: existing.version,
+        data,
+      });
       return {
-        ...row,
-        createdAt: row.createdAt.toISOString(),
-        updatedAt: row.updatedAt.toISOString(),
+        result: {
+          ...row,
+          createdAt: row.createdAt.toISOString(),
+          claimedAt: row.claimedAt ? row.claimedAt.toISOString() : null,
+          completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+          confirmedAt: row.confirmedAt ? row.confirmedAt.toISOString() : null,
+        },
+        invalidations: [{ kind: 'task-list' }],
       };
-    }
-
-    const existing = await prisma.task.findFirst({ where: { id, ...contentNotDeleted } });
-    if (!existing) throw new HttpError(404, '内容不存在');
-    await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
-    const data: Prisma.TaskUpdateInput = {};
-    if (dto.title !== undefined) data.title = dto.title.trim();
-    if (dto.desc !== undefined) data.desc = dto.desc.trim();
-    if (dto.reward !== undefined) data.reward = dto.reward.trim();
-    if (dto.location !== undefined) data.location = dto.location.trim();
-    if (dto.visibility !== undefined) data.visibility = dto.visibility;
-    if (dto.pinned !== undefined) data.pinned = dto.pinned;
-    if (dto.images !== undefined) {
-      data.images = parseStrictMediaUrlList(dto.images, MAX_TASK_IMAGES, 'image', 'images');
-    }
-    if (dto.videos !== undefined) {
-      data.videos = parseStrictMediaUrlList(dto.videos, MAX_TASK_VIDEOS, 'video', 'videos');
-    }
-    if (dto.status !== undefined) {
-      const st = dto.status.trim() as TaskStatus;
-      if (!TASK_STATUS_SET.has(st)) throw new HttpError(400, '无效的任务状态');
-      data.status = st;
-    }
-    if (dto.actorUserId !== undefined) {
-      const aid = await this.resolveActorUserId(dto.actorUserId);
-      const publisher = await prisma.user.findUnique({ where: { id: aid }, select: { name: true } });
-      data.publisherId = aid;
-      data.publisherName = publisher?.name ?? '';
-    }
-    const row = await prisma.task.update({ where: { id }, data });
-    await invalidatePendingTasksListCache();
-    return {
-      ...row,
-      createdAt: row.createdAt.toISOString(),
-      claimedAt: row.claimedAt ? row.claimedAt.toISOString() : null,
-      completedAt: row.completedAt ? row.completedAt.toISOString() : null,
-      confirmedAt: row.confirmedAt ? row.confirmedAt.toISOString() : null,
-    };
+    });
   }
 
-  async deleteContent(
-    type: 'errands' | 'posts' | 'items' | 'tasks',
-    idRaw: string,
-    operator: AdminOperator,
-  ) {
+  async deleteContent(type: 'posts' | 'items' | 'tasks', idRaw: string, operator: AdminOperator) {
     const id = idRaw.trim();
     if (!id) throw new HttpError(400, 'id 不能为空');
     const now = new Date();
 
-    if (type === 'errands') {
-      const row = await prisma.errand.findFirst({ where: { id, ...contentNotDeleted } });
-      if (!row) throw new HttpError(404, '内容不存在');
-      await this.assertCanModifyContent(operator, type, row.authorId);
-      await prisma.errand.update({ where: { id }, data: { deletedAt: now } });
-      await Promise.all([invalidateErrandListCache(), invalidateErrandRepliesCache(id)]);
-      return { id };
-    }
-
     if (type === 'posts') {
-      const row = await prisma.forumPost.findFirst({ where: { id, ...contentNotDeleted } });
+      const row = await prisma.forumPost.findFirst({
+        where: { id, ...contentNotDeleted },
+      });
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.authorId);
-      await prisma.forumPost.update({ where: { id }, data: { deletedAt: now } });
+      await prisma.forumPost.update({
+        where: { id },
+        data: { deletedAt: now },
+      });
       await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
       return { id };
     }
 
     if (type === 'items') {
-      const row = await prisma.mallItem.findFirst({ where: { id, ...contentNotDeleted } });
+      const row = await prisma.mallItem.findFirst({
+        where: { id, ...contentNotDeleted },
+      });
       if (!row) throw new HttpError(404, '内容不存在');
       await this.assertCanModifyContent(operator, type, row.publisherId);
       await prisma.mallItem.update({ where: { id }, data: { deletedAt: now } });
@@ -1592,7 +1694,9 @@ export class AdminService {
       return { id };
     }
 
-    const row = await prisma.task.findFirst({ where: { id, ...contentNotDeleted } });
+    const row = await prisma.task.findFirst({
+      where: { id, ...contentNotDeleted },
+    });
     if (!row) throw new HttpError(404, '内容不存在');
     await this.assertCanModifyContent(operator, type, row.publisherId);
     await prisma.task.update({ where: { id }, data: { deletedAt: now } });

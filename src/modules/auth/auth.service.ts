@@ -1,7 +1,9 @@
+import type { Prisma, PrismaClient } from '@prisma/client';
 import axios from 'axios';
 import jwt, { type SignOptions } from 'jsonwebtoken';
 import { HttpError } from '../../http-error';
 import { prisma } from '../../lib/prisma';
+import { runUserProfileUpdate } from '../user/user-profile-sync';
 import type { WechatLoginDto, WechatPhoneLoginDto } from './auth.dto';
 
 type JsCode2SessionResponse = {
@@ -36,6 +38,84 @@ type WechatPhoneNumberResponse = {
 let cachedAccessToken = '';
 let cachedAccessTokenExpiresAt = 0;
 
+const userSelect = {
+  id: true,
+  openid: true,
+  phoneNumber: true,
+  name: true,
+  avatar: true,
+  identityType: true,
+  gender: true,
+  householdNo: true,
+  birth: true,
+  address: true,
+  photos: true,
+  brief: true,
+  enabled: true,
+  disabledAt: true,
+  disabledReason: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+type WechatUser = Prisma.UserGetPayload<{ select: typeof userSelect }>;
+type ExistingWechatProfileRunner = (params: {
+  userId: string;
+  changes: { name?: string; avatar?: string };
+  complete: (tx: Prisma.TransactionClient) => Promise<WechatUser>;
+}) => Promise<WechatUser>;
+type WechatLoginDatabase = Pick<PrismaClient, 'user'>;
+
+export function updateExistingWechatUser(
+  userId: string,
+  profile: { nickName?: string; avatarUrl?: string; gender?: number },
+  runner: ExistingWechatProfileRunner = runUserProfileUpdate,
+): Promise<WechatUser> {
+  const nickName = profile.nickName ? String(profile.nickName).trim() : '';
+  const avatarUrl = profile.avatarUrl ? String(profile.avatarUrl).trim() : '';
+  return runner({
+    userId,
+    changes: {
+      ...(nickName ? { name: nickName } : {}),
+      ...(avatarUrl ? { avatar: avatarUrl } : {}),
+    },
+    complete: (tx) =>
+      tx.user.update({
+        where: { id: userId },
+        data: profile.gender === undefined ? {} : { gender: profile.gender },
+        select: userSelect,
+      }),
+  });
+}
+
+export async function upsertWechatLoginUser(
+  database: WechatLoginDatabase,
+  openid: string,
+  profile: { nickName?: string; avatarUrl?: string; gender?: number },
+  runner: ExistingWechatProfileRunner = runUserProfileUpdate,
+): Promise<WechatUser> {
+  const nickName = profile.nickName ? String(profile.nickName).trim() : '';
+  const avatarUrl = profile.avatarUrl ? String(profile.avatarUrl).trim() : '';
+  const user = await database.user.upsert({
+    where: { openid },
+    create: {
+      openid,
+      name: nickName || `用户${Math.floor(Math.random() * 10000)}`,
+      avatar: avatarUrl || undefined,
+      gender: profile.gender ?? 0,
+    },
+    update: {},
+    select: userSelect,
+  });
+
+  const profileChanged =
+    (nickName !== '' && user.name !== nickName) ||
+    (avatarUrl !== '' && user.avatar !== avatarUrl) ||
+    (profile.gender !== undefined && user.gender !== profile.gender);
+  if (!profileChanged) return user;
+  return updateExistingWechatUser(user.id, profile, runner);
+}
+
 function maskCode(code: string) {
   const v = String(code || '');
   if (v.length <= 8) return { len: v.length, head: v.slice(0, 2), tail: v.slice(-2) };
@@ -53,6 +133,12 @@ export function resolvePhoneLoginBindingAction(
   return 'upsert-current-openid';
 }
 
+export function defaultPhoneUserName(phoneNumber: string) {
+  return `用户${String(phoneNumber || '')
+    .trim()
+    .slice(-4)}`;
+}
+
 export class AuthService {
   private async code2Session(code: string): Promise<WechatSession> {
     const appid = process.env.WX_APPID;
@@ -61,18 +147,15 @@ export class AuthService {
       throw new HttpError(401, '后端未配置 WX_APPID/WX_APPSECRET');
     }
 
-    const r = await axios.get<JsCode2SessionResponse>(
-      'https://api.weixin.qq.com/sns/jscode2session',
-      {
-        params: {
-          appid,
-          secret,
-          js_code: code,
-          grant_type: 'authorization_code',
-        },
-        timeout: 10_000,
+    const r = await axios.get<JsCode2SessionResponse>('https://api.weixin.qq.com/sns/jscode2session', {
+      params: {
+        appid,
+        secret,
+        js_code: code,
+        grant_type: 'authorization_code',
       },
-    );
+      timeout: 10_000,
+    });
 
     const data = r.data || {};
     if (!data.openid) {
@@ -82,10 +165,7 @@ export class AuthService {
         errcode: data.errcode,
         errmsg: data.errmsg,
       });
-      throw new HttpError(
-        401,
-        data.errmsg ? `微信登录失败：${data.errmsg}` : '微信登录失败',
-      );
+      throw new HttpError(401, data.errmsg ? `微信登录失败：${data.errmsg}` : '微信登录失败');
     }
     console.info('[wechat.code2Session.ok]', { appid, code: maskCode(code) });
     return { ...data, openid: data.openid };
@@ -101,20 +181,20 @@ export class AuthService {
       throw new HttpError(401, '后端未配置 WX_APPID/WX_APPSECRET');
     }
 
-    const r = await axios.get<WechatAccessTokenResponse>(
-      'https://api.weixin.qq.com/cgi-bin/token',
-      {
-        params: {
-          grant_type: 'client_credential',
-          appid,
-          secret,
-        },
-        timeout: 10_000,
+    const r = await axios.get<WechatAccessTokenResponse>('https://api.weixin.qq.com/cgi-bin/token', {
+      params: {
+        grant_type: 'client_credential',
+        appid,
+        secret,
       },
-    );
+      timeout: 10_000,
+    });
     const data = r.data || {};
     if (!data.access_token) {
-      throw new HttpError(401, data.errmsg ? `微信 access_token 获取失败：${data.errmsg}` : '微信 access_token 获取失败');
+      throw new HttpError(
+        401,
+        data.errmsg ? `微信 access_token 获取失败：${data.errmsg}` : '微信 access_token 获取失败',
+      );
     }
 
     cachedAccessToken = data.access_token;
@@ -129,7 +209,9 @@ export class AuthService {
       throw new HttpError(500, '后端未配置 JWT_SECRET');
     }
 
-    const signOpts: SignOptions = { expiresIn: expiresIn as SignOptions['expiresIn'] };
+    const signOpts: SignOptions = {
+      expiresIn: expiresIn as SignOptions['expiresIn'],
+    };
     return {
       token: jwt.sign({ sub: user.id, openid: user.openid }, secretKey, signOpts),
       expiresIn,
@@ -138,44 +220,7 @@ export class AuthService {
 
   async wechatLogin(dto: WechatLoginDto) {
     const data = await this.code2Session(dto.code);
-
-    const nickName = dto.nickName ? String(dto.nickName).trim() : '';
-    const avatarUrl = dto.avatarUrl ? String(dto.avatarUrl).trim() : '';
-    const profileData = {
-      ...(nickName ? { name: nickName } : {}),
-      ...(avatarUrl ? { avatar: avatarUrl } : {}),
-      ...(dto.gender !== undefined ? { gender: dto.gender } : {}),
-    };
-
-    const user = await prisma.user.upsert({
-      where: { openid: data.openid },
-      update: profileData,
-      create: {
-        openid: data.openid,
-        name: nickName || `用户${Math.floor(Math.random() * 10000)}`,
-        avatar: avatarUrl || undefined,
-        gender: dto.gender ?? 0,
-      },
-      select: {
-        id: true,
-        openid: true,
-        phoneNumber: true,
-        name: true,
-        avatar: true,
-        identityType: true,
-        gender: true,
-        householdNo: true,
-        birth: true,
-        address: true,
-        photos: true,
-        brief: true,
-        enabled: true,
-        disabledAt: true,
-        disabledReason: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    const user = await upsertWechatLoginUser(prisma, data.openid, dto);
 
     const { token, expiresIn } = this.signToken(user);
 
@@ -209,26 +254,6 @@ export class AuthService {
       where: { phoneNumber },
       select: { id: true, openid: true },
     });
-    const userSelect = {
-      id: true,
-      openid: true,
-      phoneNumber: true,
-      name: true,
-      avatar: true,
-      identityType: true,
-      gender: true,
-      householdNo: true,
-      birth: true,
-      address: true,
-      photos: true,
-      brief: true,
-      enabled: true,
-      disabledAt: true,
-      disabledReason: true,
-      createdAt: true,
-      updatedAt: true,
-    } as const;
-
     const user =
       resolvePhoneLoginBindingAction(bound, session.openid) === 'migrate-bound-user'
         ? await prisma.user.update({
@@ -242,7 +267,7 @@ export class AuthService {
             create: {
               openid: session.openid!,
               phoneNumber,
-              name: `用户${phoneNumber.slice(-4)}`,
+              name: defaultPhoneUserName(phoneNumber),
               gender: 0,
             },
             select: userSelect,

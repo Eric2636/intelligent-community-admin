@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client';
+import { avatarOrDefault } from '../user/default-avatar';
 
 export function jsonImages(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
@@ -27,6 +28,8 @@ export function serializeMallItem(
     videos: Prisma.JsonValue | null;
     images: Prisma.JsonValue | null;
     publisherId: string;
+    publisherName?: string | null;
+    publisherAvatar?: string | null;
     adminLabel?: string | null;
     visibility?: string;
     pinned?: boolean;
@@ -35,13 +38,13 @@ export function serializeMallItem(
   },
   extra?: { isFavorited: boolean },
 ) {
-  const legacyImages = Array.isArray(row.images)
-    ? (row.images as unknown[]).filter((x) => typeof x === 'string')
-    : [];
+  const legacyImages = Array.isArray(row.images) ? (row.images as unknown[]).filter((x) => typeof x === 'string') : [];
   const mainImages = Array.isArray(row.mainImages)
     ? (row.mainImages as unknown[]).filter((x) => typeof x === 'string')
     : [];
-  const subImages = Array.isArray(row.subImages) ? (row.subImages as unknown[]).filter((x) => typeof x === 'string') : [];
+  const subImages = Array.isArray(row.subImages)
+    ? (row.subImages as unknown[]).filter((x) => typeof x === 'string')
+    : [];
   const videos = Array.isArray(row.videos) ? (row.videos as unknown[]).filter((x) => typeof x === 'string') : [];
 
   // 兼容：若新字段为空，但旧 images 有值，则首张视为主图
@@ -74,6 +77,8 @@ export function serializeMallItem(
     // 兼容字段：把主图+副图合并输出
     images: allImages,
     publisherId: row.publisherId,
+    publisherName: row.publisherName ?? '',
+    publisherAvatar: avatarOrDefault(row.publisherAvatar),
     adminLabel: row.adminLabel ?? '',
     visibility: row.visibility ?? 'ONLINE',
     pinned: Boolean(row.pinned),
@@ -93,7 +98,11 @@ export function serializeMallOrder(row: {
   itemPrice: string | null;
   itemUnit: string;
   sellerId: string;
+  sellerName?: string | null;
+  sellerAvatar?: string | null;
   buyerId: string;
+  buyerName?: string | null;
+  buyerAvatar?: string | null;
   contact: string | null;
   status: string;
   createdAt: Date;
@@ -107,7 +116,11 @@ export function serializeMallOrder(row: {
     itemPrice: row.itemPrice ?? '',
     itemUnit: row.itemUnit,
     sellerId: row.sellerId,
+    sellerName: row.sellerName ?? '',
+    sellerAvatar: avatarOrDefault(row.sellerAvatar),
     buyerId: row.buyerId,
+    buyerName: row.buyerName ?? '',
+    buyerAvatar: avatarOrDefault(row.buyerAvatar),
     contact: row.contact ?? '',
     status: row.status,
     createdAt: row.createdAt.toISOString(),

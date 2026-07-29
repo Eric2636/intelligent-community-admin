@@ -1,4 +1,4 @@
-import type { ForumReply, Prisma } from '@prisma/client';
+import type { ForumReply, Prisma, PrismaClient } from '@prisma/client';
 import { HttpError } from '../../http-error';
 import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
@@ -13,7 +13,11 @@ import {
   invalidateForumPostRepliesCache,
 } from '../../lib/redis-cache';
 import { adminContentAttributionForMiniPost, adminDisplayLabelForContent } from '../admin/admin.service';
+import { notify } from '../notification/notification-notify';
+import { sanitizeNotificationText } from '../notification/notification-text';
+import { avatarOrDefault } from '../user/default-avatar';
 import { contentIdentityTag, identityTypeLabel } from '../user/user-identity';
+import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
 
 const MAX_POST_IMAGES = 9;
@@ -25,20 +29,32 @@ function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
 }
 
+type ForumDatabase = Pick<PrismaClient, '$transaction'>;
+
+type ForumCacheInvalidators = {
+  invalidatePostList: () => Promise<void>;
+  invalidateReplies: (postId: string) => Promise<void>;
+};
+
+const defaultForumCacheInvalidators: ForumCacheInvalidators = {
+  invalidatePostList: invalidateForumPostListCache,
+  invalidateReplies: invalidateForumPostRepliesCache,
+};
+
+function notificationExcerpt(content: string): string {
+  return sanitizeNotificationText(content);
+}
+
 export class ForumService {
-  private async getUserDisplayName(userId: string) {
-    const row = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { name: true, avatar: true, identityType: true },
-    });
-    return { name: row?.name ?? '邻居', avatar: row?.avatar ?? '', identityType: row?.identityType ?? null };
-  }
+  constructor(
+    private readonly database: ForumDatabase = prisma,
+    private readonly cacheInvalidators: ForumCacheInvalidators = defaultForumCacheInvalidators,
+  ) {}
 
   private reviveForumReplyRows(rows: ForumReply[]): ForumReply[] {
     return rows.map((r) => ({
       ...r,
-      createdAt:
-        r.createdAt instanceof Date ? r.createdAt : new Date(r.createdAt as unknown as string),
+      createdAt: r.createdAt instanceof Date ? r.createdAt : new Date(r.createdAt as unknown as string),
     }));
   }
 
@@ -68,8 +84,14 @@ export class ForumService {
       ...contentNotDeleted,
       ...textFilter,
     };
-    const pinnedWhere: Prisma.ForumPostWhereInput = { pinned: true, ...visibleWhere };
-    const listWhere: Prisma.ForumPostWhereInput = { pinned: false, ...visibleWhere };
+    const pinnedWhere: Prisma.ForumPostWhereInput = {
+      pinned: true,
+      ...visibleWhere,
+    };
+    const listWhere: Prisma.ForumPostWhereInput = {
+      pinned: false,
+      ...visibleWhere,
+    };
 
     const orderBy =
       params.orderBy === 'hot'
@@ -115,7 +137,8 @@ export class ForumService {
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
 
-    const mapOne = (p: (typeof pinnedRows)[number]) => this.mapPostListItem(p, userId || '', likedSet.has(p.id), favSet.has(p.id));
+    const mapOne = (p: (typeof pinnedRows)[number]) =>
+      this.mapPostListItem(p, userId || '', likedSet.has(p.id), favSet.has(p.id));
 
     return {
       pinned: pinnedRows.map(mapOne),
@@ -163,9 +186,14 @@ export class ForumService {
     if (!id) throw new HttpError(400, 'postId 不能为空');
 
     const row = await prisma.$transaction(async (tx) => {
-      const exists = await tx.forumPost.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+      const exists = await tx.forumPost.findFirst({
+        where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      });
       if (!exists) return null;
-      await tx.forumPost.update({ where: { id }, data: { viewCount: { increment: 1 } } });
+      await tx.forumPost.update({
+        where: { id },
+        data: { viewCount: { increment: 1 } },
+      });
       return tx.forumPost.findUnique({ where: { id } });
     });
     if (!row) throw new HttpError(404, '帖子不存在');
@@ -204,11 +232,16 @@ export class ForumService {
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
 
-    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+    const post = await prisma.forumPost.findFirst({
+      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+    });
     if (!post) throw new HttpError(404, '帖子不存在');
     if (post.authorId !== params.userId) throw new HttpError(403, '仅能删除自己的帖子');
 
-    await prisma.forumPost.update({ where: { id }, data: { deletedAt: new Date() } });
+    await prisma.forumPost.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    });
     await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
     return {};
   }
@@ -226,20 +259,17 @@ export class ForumService {
 
       await tx.forumReply.delete({ where: { id: replyId } });
       const cnt = await tx.forumReply.count({ where: { postId } });
-      await tx.forumPost.update({ where: { id: postId }, data: { replyCount: cnt } });
+      await tx.forumPost.update({
+        where: { id: postId },
+        data: { replyCount: cnt },
+      });
     });
 
     await invalidateForumPostRepliesCache(postId);
     return {};
   }
 
-  async publishPost(params: {
-    userId: string;
-    title: string;
-    content: string;
-    images?: string[];
-    videos?: string[];
-  }) {
+  async publishPost(params: { userId: string; title: string; content: string; images?: string[]; videos?: string[] }) {
     const title = String(params.title || '').trim();
     const content = String(params.content || '').trim();
     const images = parseStrictMediaUrlList(params.images, MAX_POST_IMAGES, 'image', 'images');
@@ -249,26 +279,29 @@ export class ForumService {
       throw new HttpError(400, '请输入内容或添加图片/视频');
     }
 
-    const [{ name: authorName, avatar: authorAvatar, identityType }, boundAdmin] = await Promise.all([
-      this.getUserDisplayName(params.userId),
-      prisma.adminUser.findFirst({
+    const row = await prisma.$transaction(async (tx) => {
+      await lockUsersForProfileSnapshot(tx, [params.userId]);
+      const author = await tx.user.findUnique({
+        where: { id: params.userId },
+        select: { name: true, avatar: true, identityType: true },
+      });
+      const boundAdmin = await tx.adminUser.findFirst({
         where: { boundUserId: params.userId, enabled: true },
         select: { id: true, role: true, orgName: true },
-      }),
-    ]);
-    const adminAttribution = adminContentAttributionForMiniPost(boundAdmin);
-    const row = await prisma.forumPost.create({
-      data: {
-        title,
-        content,
-        images: jsonMedia(images),
-        videos: jsonMedia(videos),
-        authorId: params.userId,
-        authorName,
-        authorAvatar: authorAvatar || null,
-        authorIdentity: identityType,
-        ...adminAttribution,
-      },
+      });
+      return tx.forumPost.create({
+        data: {
+          title,
+          content,
+          images: jsonMedia(images),
+          videos: jsonMedia(videos),
+          authorId: params.userId,
+          authorName: author?.name ?? '邻居',
+          authorAvatar: author?.avatar ?? null,
+          authorIdentity: author?.identityType ?? null,
+          ...adminContentAttributionForMiniPost(boundAdmin),
+        },
+      });
     });
     await invalidateForumPostListCache();
     return this.mapPostDetail(row, params.userId, false, false);
@@ -291,68 +324,100 @@ export class ForumService {
       throw new HttpError(400, '请输入回复或添加图片/视频');
     }
 
-    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
-    if (!post) throw new HttpError(404, '帖子不存在');
-
     const parentReplyId: string | null = params.parentReplyId?.trim() || null;
-    let replyToAuthorName: string | null = null;
-    if (parentReplyId) {
-      const parent = await prisma.forumReply.findFirst({
-        where: { id: parentReplyId, postId: id },
+    const created = await this.database.$transaction(async (tx) => {
+      const targetPost = await tx.forumPost.findFirst({
+        where: { id, visibility: 'ONLINE', ...contentNotDeleted },
       });
-      if (!parent) throw new HttpError(400, '要回复的评论不存在');
-      replyToAuthorName = parent.authorName ?? '邻居';
-    }
+      if (!targetPost) throw new HttpError(404, '帖子不存在');
+      const targetParent = parentReplyId
+        ? await tx.forumReply.findFirst({
+            where: { id: parentReplyId, postId: id },
+          })
+        : null;
+      if (parentReplyId && !targetParent) throw new HttpError(400, '要回复的评论不存在');
 
-    let displayDepth = 0;
-    {
+      const recipientId = targetParent?.authorId ?? targetPost.authorId;
+      await lockUsersForProfileSnapshot(tx, [params.userId, recipientId]);
+
+      const post = await tx.forumPost.findFirst({
+        where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      });
+      if (!post) throw new HttpError(404, '帖子不存在');
+      const parent = parentReplyId
+        ? await tx.forumReply.findFirst({
+            where: { id: parentReplyId, postId: id },
+          })
+        : null;
+      if (parentReplyId && !parent) throw new HttpError(400, '要回复的评论不存在');
+
+      let displayDepth = 0;
       let pid: string | null = parentReplyId;
       while (pid) {
         displayDepth++;
-        const p = await prisma.forumReply.findUnique({
+        const ancestor = await tx.forumReply.findUnique({
           where: { id: pid },
           select: { parentReplyId: true, postId: true },
         });
-        if (!p || p.postId !== id) break;
-        pid = p.parentReplyId;
+        if (!ancestor || ancestor.postId !== id) break;
+        pid = ancestor.parentReplyId;
       }
-    }
-
-    const [{ name: authorName, avatar: authorAvatar, identityType }, boundAdmin] = await Promise.all([
-      this.getUserDisplayName(params.userId),
-      prisma.adminUser.findFirst({
+      const author = await tx.user.findUnique({
+        where: { id: params.userId },
+        select: { name: true, avatar: true, identityType: true },
+      });
+      const boundAdmin = await tx.adminUser.findFirst({
         where: { boundUserId: params.userId, enabled: true },
         select: { role: true, orgName: true },
-      }),
-    ]);
-    const adminLabel = boundAdmin ? adminDisplayLabelForContent(boundAdmin) : '';
-    const tag = contentIdentityTag(identityType, adminLabel);
-    const row = await prisma.$transaction(async (tx) => {
+      });
+      const adminLabel = boundAdmin ? adminDisplayLabelForContent(boundAdmin) : '';
+      const tag = contentIdentityTag(author?.identityType, adminLabel);
       const r = await tx.forumReply.create({
         data: {
           postId: id,
           parentReplyId,
-          replyToAuthorName,
+          replyToAuthorName: parent?.authorName ?? null,
+          replyToUserId: parent?.authorId ?? null,
           authorId: params.userId,
-          authorName,
-          authorIdentity: identityType,
+          authorName: author?.name ?? '邻居',
+          authorAvatar: author?.avatar ?? null,
+          authorIdentity: author?.identityType ?? null,
           content,
           images: jsonMedia(images),
           videos: jsonMedia(videos),
         },
       });
-      await tx.forumPost.update({ where: { id }, data: { replyCount: { increment: 1 } } });
-      return r;
+      await tx.forumPost.update({
+        where: { id },
+        data: { replyCount: { increment: 1 } },
+      });
+      const notificationRecipientId = parent?.authorId ?? post.authorId;
+      await notify(tx, {
+        recipientId: notificationRecipientId,
+        actorId: params.userId,
+        type: parent ? 'FORUM_REPLY_REPLY' : 'FORUM_POST_REPLY',
+        bizType: 'forum',
+        bizId: id,
+        title: parent ? '有人回复了你的评论' : '有人回复了你的帖子',
+        content: notificationExcerpt(content) || '对方发送了图片或视频回复',
+        dedupeKey: `forum:reply:${r.id}:recipient:${notificationRecipientId}`,
+      });
+      return { row: r, adminLabel, tag, displayDepth };
     });
 
-    await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
+    await Promise.all([
+      this.cacheInvalidators.invalidatePostList(),
+      this.cacheInvalidators.invalidateReplies(id),
+    ]);
 
+    const { row, adminLabel, tag, displayDepth } = created;
     return {
       _id: row.id,
       id: row.id,
       postId: row.postId,
       parentReplyId: row.parentReplyId,
       replyToAuthorName: row.replyToAuthorName,
+      replyToUserId: row.replyToUserId ?? '',
       authorId: row.authorId,
       authorName: row.authorName ?? '',
       authorIdentity: row.authorIdentity ?? '',
@@ -360,11 +425,11 @@ export class ForumService {
       adminLabel,
       contentTagLabel: tag.label,
       contentTagType: tag.type,
-      authorAvatar,
+      authorAvatar: avatarOrDefault(row.authorAvatar),
       isAuthor: true,
       content: row.content,
-      images: Array.isArray(row.images) ? row.images : row.images ?? [],
-      videos: Array.isArray(row.videos) ? row.videos : row.videos ?? [],
+      images: Array.isArray(row.images) ? row.images : (row.images ?? []),
+      videos: Array.isArray(row.videos) ? row.videos : (row.videos ?? []),
       likeCount: row.likeCount,
       isLiked: false,
       favoriteCount: row.favoriteCount,
@@ -382,10 +447,14 @@ export class ForumService {
     const postId = String(params.postId || '').trim();
     const replyId = String(params.replyId || '').trim();
     if (!postId || !replyId) throw new HttpError(400, '参数不完整');
-    const reply = await prisma.forumReply.findFirst({ where: { id: replyId, postId } });
+    const reply = await prisma.forumReply.findFirst({
+      where: { id: replyId, postId },
+    });
     if (!reply) throw new HttpError(404, '评论不存在');
     try {
-      await prisma.forumReplyLike.create({ data: { replyId, userId: params.userId } });
+      await prisma.forumReplyLike.create({
+        data: { replyId, userId: params.userId },
+      });
       const updated = await prisma.forumReply.update({
         where: { id: replyId },
         data: { likeCount: { increment: 1 } },
@@ -393,7 +462,10 @@ export class ForumService {
       await invalidateForumPostRepliesCache(postId);
       return { isLiked: true, likeCount: updated.likeCount };
     } catch {
-      const row = await prisma.forumReply.findUnique({ where: { id: replyId }, select: { likeCount: true } });
+      const row = await prisma.forumReply.findUnique({
+        where: { id: replyId },
+        select: { likeCount: true },
+      });
       await invalidateForumPostRepliesCache(postId);
       return { isLiked: true, likeCount: row?.likeCount ?? 0 };
     }
@@ -403,7 +475,9 @@ export class ForumService {
     const postId = String(params.postId || '').trim();
     const replyId = String(params.replyId || '').trim();
     if (!postId || !replyId) throw new HttpError(400, '参数不完整');
-    const reply = await prisma.forumReply.findFirst({ where: { id: replyId, postId } });
+    const reply = await prisma.forumReply.findFirst({
+      where: { id: replyId, postId },
+    });
     if (!reply) throw new HttpError(404, '评论不存在');
     try {
       await prisma.forumReplyLike.delete({
@@ -416,7 +490,10 @@ export class ForumService {
       await invalidateForumPostRepliesCache(postId);
       return { isLiked: false, likeCount: Math.max(0, updated.likeCount) };
     } catch {
-      const row = await prisma.forumReply.findUnique({ where: { id: replyId }, select: { likeCount: true } });
+      const row = await prisma.forumReply.findUnique({
+        where: { id: replyId },
+        select: { likeCount: true },
+      });
       await invalidateForumPostRepliesCache(postId);
       return { isLiked: false, likeCount: row?.likeCount ?? 0 };
     }
@@ -426,10 +503,14 @@ export class ForumService {
     const postId = String(params.postId || '').trim();
     const replyId = String(params.replyId || '').trim();
     if (!postId || !replyId) throw new HttpError(400, '参数不完整');
-    const reply = await prisma.forumReply.findFirst({ where: { id: replyId, postId } });
+    const reply = await prisma.forumReply.findFirst({
+      where: { id: replyId, postId },
+    });
     if (!reply) throw new HttpError(404, '评论不存在');
     try {
-      await prisma.forumReplyFavorite.create({ data: { replyId, userId: params.userId } });
+      await prisma.forumReplyFavorite.create({
+        data: { replyId, userId: params.userId },
+      });
       const updated = await prisma.forumReply.update({
         where: { id: replyId },
         data: { favoriteCount: { increment: 1 } },
@@ -437,7 +518,10 @@ export class ForumService {
       await invalidateForumPostRepliesCache(postId);
       return { isFavorited: true, favoriteCount: updated.favoriteCount };
     } catch {
-      const row = await prisma.forumReply.findUnique({ where: { id: replyId }, select: { favoriteCount: true } });
+      const row = await prisma.forumReply.findUnique({
+        where: { id: replyId },
+        select: { favoriteCount: true },
+      });
       await invalidateForumPostRepliesCache(postId);
       return { isFavorited: true, favoriteCount: row?.favoriteCount ?? 0 };
     }
@@ -447,7 +531,9 @@ export class ForumService {
     const postId = String(params.postId || '').trim();
     const replyId = String(params.replyId || '').trim();
     if (!postId || !replyId) throw new HttpError(400, '参数不完整');
-    const reply = await prisma.forumReply.findFirst({ where: { id: replyId, postId } });
+    const reply = await prisma.forumReply.findFirst({
+      where: { id: replyId, postId },
+    });
     if (!reply) throw new HttpError(404, '评论不存在');
     try {
       await prisma.forumReplyFavorite.delete({
@@ -459,12 +545,18 @@ export class ForumService {
       });
       const fc = Math.max(0, updated.favoriteCount);
       if (fc !== updated.favoriteCount) {
-        await prisma.forumReply.update({ where: { id: replyId }, data: { favoriteCount: fc } });
+        await prisma.forumReply.update({
+          where: { id: replyId },
+          data: { favoriteCount: fc },
+        });
       }
       await invalidateForumPostRepliesCache(postId);
       return { isFavorited: false, favoriteCount: fc };
     } catch {
-      const row = await prisma.forumReply.findUnique({ where: { id: replyId }, select: { favoriteCount: true } });
+      const row = await prisma.forumReply.findUnique({
+        where: { id: replyId },
+        select: { favoriteCount: true },
+      });
       await invalidateForumPostRepliesCache(postId);
       return { isFavorited: false, favoriteCount: row?.favoriteCount ?? 0 };
     }
@@ -474,7 +566,9 @@ export class ForumService {
     const postId = String(params.postId || '').trim();
     const replyId = String(params.replyId || '').trim();
     if (!postId || !replyId) throw new HttpError(400, '参数不完整');
-    const reply = await prisma.forumReply.findFirst({ where: { id: replyId, postId } });
+    const reply = await prisma.forumReply.findFirst({
+      where: { id: replyId, postId },
+    });
     if (!reply) throw new HttpError(404, '评论不存在');
 
     const raw = (params.emoji ?? '').trim();
@@ -494,7 +588,10 @@ export class ForumService {
     }
 
     if (existing) {
-      await prisma.forumReplyReaction.update({ where: key, data: { emoji: raw } });
+      await prisma.forumReplyReaction.update({
+        where: key,
+        data: { emoji: raw },
+      });
     } else {
       await prisma.forumReplyReaction.create({
         data: { replyId, userId: params.userId, emoji: raw },
@@ -530,12 +627,20 @@ export class ForumService {
     });
     if (!post) throw new HttpError(404, '帖子不存在');
     try {
-      await prisma.forumPostLike.create({ data: { postId: id, userId: params.userId } });
-      const updated = await prisma.forumPost.update({ where: { id }, data: { likeCount: { increment: 1 } } });
+      await prisma.forumPostLike.create({
+        data: { postId: id, userId: params.userId },
+      });
+      const updated = await prisma.forumPost.update({
+        where: { id },
+        data: { likeCount: { increment: 1 } },
+      });
       await invalidateForumPostListCache();
       return { liked: true, likeCount: updated.likeCount };
     } catch {
-      const row = await prisma.forumPost.findUnique({ where: { id }, select: { likeCount: true } });
+      const row = await prisma.forumPost.findUnique({
+        where: { id },
+        select: { likeCount: true },
+      });
       await invalidateForumPostListCache();
       return { liked: true, likeCount: row?.likeCount ?? 0 };
     }
@@ -550,7 +655,9 @@ export class ForumService {
     });
     if (!post) throw new HttpError(404, '帖子不存在');
     try {
-      await prisma.forumPostLike.delete({ where: { postId_userId: { postId: id, userId: params.userId } } });
+      await prisma.forumPostLike.delete({
+        where: { postId_userId: { postId: id, userId: params.userId } },
+      });
       const updated = await prisma.forumPost.update({
         where: { id },
         data: { likeCount: { decrement: 1 } },
@@ -558,7 +665,10 @@ export class ForumService {
       await invalidateForumPostListCache();
       return { liked: false, likeCount: Math.max(0, updated.likeCount) };
     } catch {
-      const row = await prisma.forumPost.findUnique({ where: { id }, select: { likeCount: true } });
+      const row = await prisma.forumPost.findUnique({
+        where: { id },
+        select: { likeCount: true },
+      });
       await invalidateForumPostListCache();
       return { liked: false, likeCount: row?.likeCount ?? 0 };
     }
@@ -573,7 +683,9 @@ export class ForumService {
     });
     if (!post) throw new HttpError(404, '帖子不存在');
     try {
-      await prisma.forumPostFavorite.create({ data: { postId: id, userId: params.userId } });
+      await prisma.forumPostFavorite.create({
+        data: { postId: id, userId: params.userId },
+      });
     } catch {
       // duplicate
     }
@@ -589,7 +701,9 @@ export class ForumService {
     });
     if (!post) throw new HttpError(404, '帖子不存在');
     try {
-      await prisma.forumPostFavorite.delete({ where: { postId_userId: { postId: id, userId: params.userId } } });
+      await prisma.forumPostFavorite.delete({
+        where: { postId_userId: { postId: id, userId: params.userId } },
+      });
     } catch {
       // ignore
     }
@@ -598,12 +712,20 @@ export class ForumService {
 
   async getMyPosts(params: { userId: string }) {
     const rows = await prisma.forumPost.findMany({
-      where: { authorId: params.userId, visibility: 'ONLINE', postType: 'NORMAL', ...contentNotDeleted },
+      where: {
+        authorId: params.userId,
+        visibility: 'ONLINE',
+        postType: 'NORMAL',
+        ...contentNotDeleted,
+      },
       orderBy: { createdAt: 'desc' },
     });
     const ids = rows.map((r) => r.id);
     const [liked, favorited] = await Promise.all([
-      prisma.forumPostLike.findMany({ where: { userId: params.userId, postId: { in: ids } }, select: { postId: true } }),
+      prisma.forumPostLike.findMany({
+        where: { userId: params.userId, postId: { in: ids } },
+        select: { postId: true },
+      }),
       prisma.forumPostFavorite.findMany({
         where: { userId: params.userId, postId: { in: ids } },
         select: { postId: true },
@@ -638,8 +760,10 @@ export class ForumService {
       postId: string;
       parentReplyId: string | null;
       replyToAuthorName: string | null;
+      replyToUserId?: string | null;
       authorId: string;
       authorName: string | null;
+      authorAvatar?: string | null;
       authorIdentity?: string | null;
       content: string;
       images: unknown;
@@ -652,7 +776,7 @@ export class ForumService {
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
     const authorIds = [...new Set(rows.map((r) => r.authorId).filter(Boolean))];
-    const [likes, favs, userReactions, reactionAgg, users, admins] = await Promise.all([
+    const [likes, favs, userReactions, reactionAgg, admins] = await Promise.all([
       userId
         ? prisma.forumReplyLike.findMany({
             where: { userId, replyId: { in: ids } },
@@ -676,10 +800,6 @@ export class ForumService {
         where: { replyId: { in: ids } },
         _count: { _all: true },
       }),
-      prisma.user.findMany({
-        where: { id: { in: authorIds } },
-        select: { id: true, avatar: true },
-      }),
       prisma.adminUser.findMany({
         where: { boundUserId: { in: authorIds }, enabled: true },
         select: { boundUserId: true, role: true, orgName: true },
@@ -688,11 +808,8 @@ export class ForumService {
     const likedSet = new Set(likes.map((x) => x.replyId));
     const favSet = new Set(favs.map((x) => x.replyId));
     const myReactMap = new Map(userReactions.map((x) => [x.replyId, x.emoji] as const));
-    const userAvatarMap = new Map(users.map((x) => [x.id, x.avatar ?? ''] as const));
     const adminLabelMap = new Map(
-      admins
-        .filter((x) => x.boundUserId)
-        .map((x) => [x.boundUserId!, adminDisplayLabelForContent(x)] as const),
+      admins.filter((x) => x.boundUserId).map((x) => [x.boundUserId!, adminDisplayLabelForContent(x)] as const),
     );
     const countMap = new Map<string, Record<string, number>>();
     for (const g of reactionAgg) {
@@ -709,6 +826,7 @@ export class ForumService {
         postId: r.postId,
         parentReplyId: r.parentReplyId,
         replyToAuthorName: r.replyToAuthorName,
+        replyToUserId: r.replyToUserId ?? '',
         authorId: r.authorId,
         authorName: r.authorName ?? '',
         authorIdentity: r.authorIdentity ?? '',
@@ -716,11 +834,11 @@ export class ForumService {
         adminLabel,
         contentTagLabel: tag.label,
         contentTagType: tag.type,
-        authorAvatar: userAvatarMap.get(r.authorId) ?? '',
+        authorAvatar: avatarOrDefault(r.authorAvatar),
         isAuthor: r.authorId === userId,
         content: r.content,
-        images: Array.isArray(r.images) ? r.images : r.images ?? [],
-        videos: Array.isArray(r.videos) ? r.videos : r.videos ?? [],
+        images: Array.isArray(r.images) ? r.images : (r.images ?? []),
+        videos: Array.isArray(r.videos) ? r.videos : (r.videos ?? []),
         likeCount: r.likeCount,
         isLiked: likedSet.has(r.id),
         favoriteCount: r.favoriteCount,
@@ -819,8 +937,8 @@ export class ForumService {
     isLiked: boolean,
     isFavorited: boolean,
   ) {
-    const images = Array.isArray(p.images) ? p.images : p.images ?? [];
-    const videos = Array.isArray(p.videos) ? p.videos : p.videos ?? [];
+    const images = Array.isArray(p.images) ? p.images : (p.images ?? []);
+    const videos = Array.isArray(p.videos) ? p.videos : (p.videos ?? []);
     const tag = contentIdentityTag(p.authorIdentity, p.adminLabel);
     return {
       _id: p.id,
@@ -834,7 +952,7 @@ export class ForumService {
       authorName: p.authorName ?? '',
       authorIdentity: p.authorIdentity ?? '',
       authorIdentityLabel: identityTypeLabel(p.authorIdentity),
-      authorAvatar: p.authorAvatar ?? '',
+      authorAvatar: avatarOrDefault(p.authorAvatar),
       adminLabel: p.adminLabel ?? '',
       contentTagLabel: tag.label,
       contentTagType: tag.type,
@@ -881,7 +999,7 @@ export class ForumService {
     const base = this.mapPostListItem(p, userId, isLiked, isFavorited);
     return {
       ...base,
-      authorAvatar: p.authorAvatar ?? '',
+      authorAvatar: avatarOrDefault(p.authorAvatar),
     };
   }
 }

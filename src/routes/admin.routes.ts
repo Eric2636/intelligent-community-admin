@@ -18,6 +18,8 @@ import {
   UpdateUserEnabledDto,
 } from '../modules/admin/admin.dto';
 import { AdminService } from '../modules/admin/admin.service';
+import { redactPath } from '../modules/api-log/api-log-redaction';
+import { registerApiLogRoutes } from '../modules/api-log/api-log.routes';
 import { MiniApiErrorLogQueryDto } from '../modules/client-log/client-log.dto';
 import { ClientLogService } from '../modules/client-log/client-log.service';
 import { MallCategoryService } from '../modules/mall/mall-category.service';
@@ -26,9 +28,11 @@ import { SettingsService } from '../modules/settings/settings.service';
 import { CosCredentialsDto } from '../modules/upload/upload.dto';
 import { UploadService } from '../modules/upload/upload.service';
 import { parseDto } from '../validate';
+import { registerAdminSystemNoticeRoute } from './admin-system-notice.routes';
 import { jsonBody } from './json-body';
 
-const contentTypes = new Set(['errands', 'posts', 'items', 'tasks']);
+const contentTypes = new Set(['posts', 'items', 'tasks']);
+const contentTypeLabels: Record<string, string> = { posts: '小区留言', items: '小区市场', tasks: '业主互助' };
 const uploadService = new UploadService();
 const mallCategoryService = new MallCategoryService();
 const uploadMaxBytes = Number(process.env.UPLOAD_MAX_BYTES || String(100 * 1024 * 1024));
@@ -40,12 +44,19 @@ function pageOf(q: { page?: number; pageSize?: number }) {
   };
 }
 
+function auditDetail(ctx: { protocol: string; host: string; originalUrl?: string; url: string; path: string }, detail: Record<string, unknown>) {
+  return { ...detail, requestUrl: `${ctx.protocol}://${ctx.host}${redactPath(ctx.originalUrl || ctx.url || ctx.path)}` };
+}
+
 export function registerAdminRoutes(
   router: Router,
   adminService: AdminService,
   settingsService: SettingsService,
   clientLogService: ClientLogService,
 ) {
+  registerApiLogRoutes(router);
+  registerAdminSystemNoticeRoute(router);
+
   router.get('/api/admin/auth/captcha', async (ctx) => {
     const data = await adminService.createLoginCaptcha();
     ctx.body = { code: 200, data };
@@ -60,6 +71,7 @@ export function registerAdminRoutes(
       captchaId: dto.captchaId,
       captchaCode: dto.captchaCode,
       ip: ctx.ip,
+      requestUrl: `${ctx.protocol}://${ctx.host}${redactPath(ctx.originalUrl || ctx.url || ctx.path)}`,
     });
     if (!res.ok) {
       ctx.status = res.statusCode;
@@ -123,7 +135,7 @@ export function registerAdminRoutes(
       adminUsername: ctx.state.admin.username,
       ip: ctx.ip,
       action: 'USER_ENABLED_UPDATE',
-      detail: { userId, enabled: dto.enabled, reason: dto.reason ?? '' },
+      detail: auditDetail(ctx, { userId, enabled: dto.enabled, reason: dto.reason ?? '' }),
     });
     ctx.body = {
       code: 200,
@@ -170,7 +182,7 @@ export function registerAdminRoutes(
       adminUsername: ctx.state.admin.username,
       ip: ctx.ip,
       action: 'ADMIN_CREATE',
-      detail: { username: dto.username, type: dto.type ?? 'OFFICIAL', orgName: dto.orgName ?? '' },
+      detail: auditDetail(ctx, { username: dto.username, type: dto.type ?? 'OFFICIAL', orgName: dto.orgName ?? '' }),
     });
     ctx.body = {
       code: 200,
@@ -193,7 +205,7 @@ export function registerAdminRoutes(
       adminUsername: ctx.state.admin.username,
       ip: ctx.ip,
       action: 'ADMIN_UPDATE',
-      detail: { adminId, enabled: dto.enabled, type: dto.type, orgName: dto.orgName, boundUserId: dto.boundUserId },
+      detail: auditDetail(ctx, { adminId, enabled: dto.enabled, type: dto.type, orgName: dto.orgName, boundUserId: dto.boundUserId }),
     });
     ctx.body = {
       code: 200,
@@ -215,7 +227,7 @@ export function registerAdminRoutes(
       adminUsername: ctx.state.admin.username,
       ip: ctx.ip,
       action: 'ADMIN_DELETE',
-      detail: { adminId },
+      detail: auditDetail(ctx, { adminId }),
     });
     ctx.body = {
       code: 200,
@@ -231,7 +243,7 @@ export function registerAdminRoutes(
       adminUsername: ctx.state.admin.username,
       ip: ctx.ip,
       action: 'ADMIN_RESET_PASSWORD',
-      detail: { adminId },
+      detail: auditDetail(ctx, { adminId }),
     });
     ctx.body = {
       code: 200,
@@ -247,7 +259,7 @@ export function registerAdminRoutes(
       adminUsername: ctx.state.admin.username,
       ip: ctx.ip,
       action: 'ADMIN_UNLOCK_LOGIN',
-      detail: { adminId },
+      detail: auditDetail(ctx, { adminId }),
     });
     ctx.body = { code: 200, data: await adminService.superAdminUnlockAdminLogin(adminId) };
   });
@@ -285,7 +297,7 @@ export function registerAdminRoutes(
     const q = await parseDto(AdminContentQueryDto, ctx.query);
     ctx.body = {
       code: 200,
-      data: await adminService.listContent(type as 'errands' | 'posts' | 'items' | 'tasks', {
+      data: await adminService.listContent(type as 'posts' | 'items' | 'tasks', {
         ...pageOf(q),
         keyword: q.keyword,
         visibility: q.visibility,
@@ -301,7 +313,7 @@ export function registerAdminRoutes(
       ctx.body = { statusCode: 404, message: '内容类型不存在' };
       return;
     }
-    const data = await adminService.getContentDetail(type as 'errands' | 'posts' | 'items' | 'tasks', id);
+    const data = await adminService.getContentDetail(type as 'posts' | 'items' | 'tasks', id);
     if (!data) {
       ctx.status = 404;
       ctx.body = { statusCode: 404, message: '内容不存在' };
@@ -321,7 +333,7 @@ export function registerAdminRoutes(
     ctx.body = {
       code: 200,
       data: await adminService.createContent(
-        type as 'errands' | 'posts' | 'items' | 'tasks',
+        type as 'posts' | 'items' | 'tasks',
         dto,
         ctx.state.admin,
       ),
@@ -340,7 +352,7 @@ export function registerAdminRoutes(
     ctx.body = {
       code: 200,
       data: await adminService.updateContentFields(
-        type as 'errands' | 'posts' | 'items' | 'tasks',
+        type as 'posts' | 'items' | 'tasks',
         id,
         dto,
         ctx.state.admin,
@@ -359,7 +371,7 @@ export function registerAdminRoutes(
     ctx.body = {
       code: 200,
       data: await adminService.deleteContent(
-        type as 'errands' | 'posts' | 'items' | 'tasks',
+        type as 'posts' | 'items' | 'tasks',
         id,
         ctx.state.admin,
       ),
@@ -375,17 +387,22 @@ export function registerAdminRoutes(
       return;
     }
     const dto = await parseDto(UpdateContentStateDto, jsonBody(ctx));
+    const data = await adminService.updateContentState(
+      type as 'posts' | 'items' | 'tasks',
+      id,
+      { visibility: dto.visibility, pinned: dto.pinned },
+      ctx.state.admin,
+    );
+    await adminService.writeSystemLog({
+      adminId: ctx.state.admin.adminId,
+      adminUsername: ctx.state.admin.username,
+      ip: ctx.ip,
+      action: dto.pinned === undefined ? 'CONTENT_VISIBILITY_UPDATE' : 'CONTENT_PIN_UPDATE',
+      detail: auditDetail(ctx, { module: contentTypeLabels[type], contentId: id, ...(dto.pinned === undefined ? { visibility: dto.visibility } : { pinned: dto.pinned }) }),
+    });
     ctx.body = {
       code: 200,
-      data: await adminService.updateContentState(
-        type as 'errands' | 'posts' | 'items' | 'tasks',
-        id,
-        {
-          visibility: dto.visibility,
-          pinned: dto.pinned,
-        },
-        ctx.state.admin,
-      ),
+      data,
     };
   });
 
@@ -397,17 +414,22 @@ export function registerAdminRoutes(
       return;
     }
     const dto = await parseDto(BatchUpdateContentStateDto, jsonBody(ctx));
+    const data = await adminService.batchUpdateContentState(
+      type as 'posts' | 'items' | 'tasks',
+      dto.ids,
+      { visibility: dto.visibility, pinned: dto.pinned },
+      ctx.state.admin,
+    );
+    await adminService.writeSystemLog({
+      adminId: ctx.state.admin.adminId,
+      adminUsername: ctx.state.admin.username,
+      ip: ctx.ip,
+      action: 'CONTENT_BATCH_STATE_UPDATE',
+      detail: auditDetail(ctx, { module: contentTypeLabels[type], contentIds: dto.ids, affectedCount: data.count, visibility: dto.visibility, pinned: dto.pinned }),
+    });
     ctx.body = {
       code: 200,
-      data: await adminService.batchUpdateContentState(
-        type as 'errands' | 'posts' | 'items' | 'tasks',
-        dto.ids,
-        {
-          visibility: dto.visibility,
-          pinned: dto.pinned,
-        },
-        ctx.state.admin,
-      ),
+      data,
     };
   });
 

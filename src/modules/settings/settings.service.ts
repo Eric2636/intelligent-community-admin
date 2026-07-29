@@ -7,7 +7,9 @@ import {
   invalidateModuleEntryTabsCache,
 } from '../../lib/redis-cache';
 
-export type ModuleTabKey = 'task' | 'errand' | 'forum' | 'mall' | 'my';
+export type ModuleTabKey = 'task' | 'forum' | 'mall' | 'my';
+const MODULE_TAB_KEYS: ModuleTabKey[] = ['task', 'forum', 'mall', 'my'];
+const MODULE_TAB_KEY_SET = new Set<string>(MODULE_TAB_KEYS);
 
 export class SettingsService {
   async getModuleEntryTabs() {
@@ -20,6 +22,7 @@ export class SettingsService {
   async listModuleEntryTabsForAdmin() {
     await this.ensureModuleTabsSeeded();
     const rows = await prisma.appSettingTab.findMany({
+      where: { key: { in: MODULE_TAB_KEYS } },
       orderBy: [{ order: 'asc' }, { key: 'asc' }],
       select: {
         key: true,
@@ -41,6 +44,7 @@ export class SettingsService {
   async setModuleTabEnabled(keyRaw: string, enabled: boolean) {
     const key = String(keyRaw || '').trim();
     if (!key) throw new HttpError(400, '缺少模块 key');
+    if (!MODULE_TAB_KEY_SET.has(key)) throw new HttpError(404, '未知模块');
     await this.ensureModuleTabsSeeded();
     const row = await prisma.appSettingTab.findUnique({ where: { key } });
     if (!row) throw new HttpError(404, '未知模块');
@@ -56,7 +60,9 @@ export class SettingsService {
   }
 
   private async ensureModuleTabsSeeded() {
-    const count = await prisma.appSettingTab.count();
+    const count = await prisma.appSettingTab.count({
+      where: { key: { in: MODULE_TAB_KEYS } },
+    });
     if (count > 0) return;
 
     const defaults: Array<{
@@ -69,7 +75,6 @@ export class SettingsService {
       order?: number;
     }> = [
       { key: 'task', icon: 'file-copy', enabled: true, label: '业主互助', order: 10 },
-      { key: 'errand', icon: 'service', enabled: false, label: '小区跑腿', order: 20 },
       { key: 'forum', icon: 'chat', enabled: true, label: '小区留言', order: 30 },
       { key: 'mall', icon: 'cart', enabled: true, label: '小区市场', order: 40 },
       { key: 'my', icon: 'user', enabled: true, always: true, label: '我的', order: 50 },
@@ -93,6 +98,7 @@ export class SettingsService {
   private async loadModuleEntryTabsFromDb() {
     await this.ensureModuleTabsSeeded();
     const rows = await prisma.appSettingTab.findMany({
+      where: { key: { in: MODULE_TAB_KEYS } },
       orderBy: [{ order: 'asc' }, { key: 'asc' }],
       select: {
         key: true,

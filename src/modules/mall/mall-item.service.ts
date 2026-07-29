@@ -11,6 +11,7 @@ import {
   MALL_ITEM_DETAIL_TTL_SEC,
   MALL_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
+import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { MallCategoryService } from './mall-category.service';
 import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
 import { jsonImages, parsePriceNum, serializeMallItem } from './mall.serialize';
@@ -19,6 +20,7 @@ export class MallItemService {
   private readonly categories = new MallCategoryService();
 
   async listItems(params: {
+    userId?: string;
     categoryId?: string;
     keyword?: string;
     orderBy?: 'time' | 'price_asc' | 'price_desc';
@@ -26,8 +28,11 @@ export class MallItemService {
     const { categoryId, keyword, orderBy = 'time' } = params;
     const k = keyword?.trim() || '';
     const cacheKey = await mallItemsListCacheKey(categoryId, k, orderBy);
-    return cacheAsideJson(cacheKey, MALL_LIST_TTL_SEC, async () => {
-      const where: Prisma.MallItemWhereInput = { visibility: 'ONLINE', ...contentNotDeleted };
+    const base = await cacheAsideJson(cacheKey, MALL_LIST_TTL_SEC, async () => {
+      const where: Prisma.MallItemWhereInput = {
+        visibility: 'ONLINE',
+        ...contentNotDeleted,
+      };
       if (categoryId && categoryId !== 'all') {
         where.categoryId = categoryId;
       }
@@ -50,14 +55,26 @@ export class MallItemService {
 
       return list.map((r) => serializeMallItem(r));
     });
+    if (!params.userId || base.length === 0) {
+      return base.map((item) => ({ ...item, isFavorited: false }));
+    }
+
+    const favorites = await prisma.mallItemFavorite.findMany({
+      where: { userId: params.userId, itemId: { in: base.map((item) => item.id) } },
+      select: { itemId: true },
+    });
+    const favoriteItemIds = new Set(favorites.map((favorite) => favorite.itemId));
+    return base.map((item) => ({ ...item, isFavorited: favoriteItemIds.has(item.id) }));
   }
 
-  async getItemDetail(params: { userId: string; itemId: string }) {
+  async getItemDetail(params: { userId?: string; itemId: string }) {
     const id = String(params.itemId || '').trim();
     if (!id) throw new HttpError(400, '商品 id 不能为空');
 
     const base = await cacheAsideJson(mallItemDetailCacheKey(id), MALL_ITEM_DETAIL_TTL_SEC, async () => {
-      const row = await prisma.mallItem.findFirst({ where: { id, ...contentNotDeleted } });
+      const row = await prisma.mallItem.findFirst({
+        where: { id, ...contentNotDeleted },
+      });
       if (!row) throw new HttpError(404, '商品不存在');
       return serializeMallItem(row);
     });
@@ -65,9 +82,11 @@ export class MallItemService {
       throw new HttpError(404, '商品不存在');
     }
 
-    const fav = await prisma.mallItemFavorite.findUnique({
-      where: { itemId_userId: { itemId: id, userId: params.userId } },
-    });
+    const fav = params.userId
+      ? await prisma.mallItemFavorite.findUnique({
+          where: { itemId_userId: { itemId: id, userId: params.userId } },
+        })
+      : null;
 
     return { ...base, isFavorited: Boolean(fav) };
   }
@@ -101,25 +120,35 @@ export class MallItemService {
     const imgTotal = normalizedMainImages.length + normalizedSubImages.length;
     if (imgTotal > 6) throw new HttpError(400, '图片最多上传 6 张（主图+副图合计）');
 
-    const row = await prisma.mallItem.create({
-      data: {
-        categoryId: await this.categories.assertEnabledCategoryId(params.categoryId),
-        title: params.title.trim(),
-        price: params.price?.trim() || null,
-        unit: (params.unit?.trim() || '元').slice(0, 16),
-        desc: params.desc?.trim() || '',
-        contact: params.contact?.trim() || null,
-        locationName: params.locationName?.trim() || null,
-        locationAddress: params.locationAddress?.trim() || null,
-        latitude: Number.isFinite(params.latitude) ? params.latitude : null,
-        longitude: Number.isFinite(params.longitude) ? params.longitude : null,
-        mainImages: normalizedMainImages.length ? jsonImages(normalizedMainImages) : undefined,
-        subImages: normalizedSubImages.length ? jsonImages(normalizedSubImages) : undefined,
-        videos: videos.length ? jsonImages(videos) : undefined,
-        images: legacyImages.length ? jsonImages(legacyImages) : undefined,
-        publisherId: params.userId,
-        visibility: MALL_DEFAULT_VISIBILITY,
-      },
+    const categoryId = await this.categories.assertEnabledCategoryId(params.categoryId);
+    const row = await prisma.$transaction(async (tx) => {
+      await lockUsersForProfileSnapshot(tx, [params.userId]);
+      const publisher = await tx.user.findUnique({
+        where: { id: params.userId },
+        select: { name: true, avatar: true },
+      });
+      return tx.mallItem.create({
+        data: {
+          categoryId,
+          title: params.title.trim(),
+          price: params.price?.trim() || null,
+          unit: (params.unit?.trim() || '元').slice(0, 16),
+          desc: params.desc?.trim() || '',
+          contact: params.contact?.trim() || null,
+          locationName: params.locationName?.trim() || null,
+          locationAddress: params.locationAddress?.trim() || null,
+          latitude: Number.isFinite(params.latitude) ? params.latitude : null,
+          longitude: Number.isFinite(params.longitude) ? params.longitude : null,
+          mainImages: normalizedMainImages.length ? jsonImages(normalizedMainImages) : undefined,
+          subImages: normalizedSubImages.length ? jsonImages(normalizedSubImages) : undefined,
+          videos: videos.length ? jsonImages(videos) : undefined,
+          images: legacyImages.length ? jsonImages(legacyImages) : undefined,
+          publisherId: params.userId,
+          publisherName: publisher?.name ?? '',
+          publisherAvatar: publisher?.avatar ?? null,
+          visibility: MALL_DEFAULT_VISIBILITY,
+        },
+      });
     });
     const s = serializeMallItem(row);
     await invalidateMallItemsListCache();

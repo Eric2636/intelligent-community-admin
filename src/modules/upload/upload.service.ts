@@ -3,7 +3,7 @@ import COS from 'cos-nodejs-sdk-v5';
 import { getCredential } from 'qcloud-cos-sts';
 import { HttpError } from '../../http-error';
 
-const UPLOAD_MODULES = new Set(['forum', 'task', 'errand', 'mall', 'avatar']);
+const UPLOAD_MODULES = new Set(['forum', 'task', 'mall', 'avatar']);
 const UPLOAD_TYPES = new Set(['img', 'vid']);
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif', 'avif']);
 const VIDEO_EXTS = new Set(['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm', '3gp', 'mpeg', 'mpg', 'flv']);

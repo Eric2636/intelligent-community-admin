@@ -325,7 +325,7 @@ export class AdminUpdateContentDto {
   @IsDateString()
   validUntil?: string;
 
-  /** errands: PENDING_TAKE | IN_PROGRESS | COMPLETED；tasks: TaskStatus 枚举字符串 */
+  /** tasks: TaskStatus 枚举字符串 */
   @IsOptional()
   @IsString()
   status?: string;

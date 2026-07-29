@@ -1,5 +1,16 @@
-import { Type } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsIn, IsNumber, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsIn,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 export class GetMallItemsQueryDto {
   @IsOptional()
@@ -93,33 +104,22 @@ export class PublishMallItemDto {
 }
 
 export class CreateMallOrderDto {
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @MinLength(1)
   itemId!: string;
 
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]{16,64}$/)
+  clientRequestId!: string;
+
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsOptional()
   @IsString()
   @MaxLength(500)
-  itemTitle?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(64)
-  itemPrice?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(16)
-  itemUnit?: string;
-
-  @IsString()
-  @MinLength(1)
-  sellerId!: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(500)
-  contact?: string;
+  @IsNotEmpty()
+  buyerContact?: string;
 }
 
 export class PatchMallOrderDto {

@@ -5,8 +5,12 @@ import Koa = require('koa');
 import bodyParser from 'koa-bodyparser';
 import { koaSwagger } from 'koa2-swagger-ui';
 import { prisma } from './lib/prisma';
+import { adminMutationAudit } from './middleware/admin-mutation-audit';
+import { apiAccessLog } from './middleware/api-access-log';
 import { errorHandler } from './middleware/error-handler';
 import { AdminService } from './modules/admin/admin.service';
+import { syncRegisteredApiEndpoints } from './modules/api-log/api-endpoint.service';
+import { validateDefaultAvatarConfiguration } from './modules/user/default-avatar';
 import { createRouter } from './routes';
 import { openApiDocument } from './swagger/openapi';
 
@@ -34,14 +38,19 @@ function logRuntimeEnvironment() {
 }
 
 async function bootstrap() {
+  validateDefaultAvatarConfiguration(process.env.APP_ENV, process.env.DEFAULT_AVATAR_URL);
   logRuntimeEnvironment();
   await prisma.$connect();
   await new AdminService().ensureDefaultSuperAdmin();
 
   const app = new Koa();
+  // Keep this outermost so it observes both normal responses and errors handled
+  // by the shared error handler, without changing the response on log failure.
+  app.use(apiAccessLog);
   app.use(errorHandler);
   app.use(cors());
   app.use(bodyParser());
+  app.use(adminMutationAudit);
   app.use(
     koaSwagger({
       title: '智慧社区管理端 API',
@@ -61,6 +70,9 @@ async function bootstrap() {
   const port = Number(process.env.PORT) || 3000;
   app.listen(port, '0.0.0.0', () => {
     console.log(`Listening on http://0.0.0.0:${port}`);
+    void syncRegisteredApiEndpoints(router).then((result) => {
+      console.info('[api-endpoint-sync]', result);
+    });
   });
 }
 

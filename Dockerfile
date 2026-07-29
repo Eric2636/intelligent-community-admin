@@ -11,6 +11,12 @@ COPY src ./src
 
 RUN npx prisma generate
 RUN npm run build
+
+# 数据库同步使用此阶段，保留 Prisma CLI 和迁移引擎。
+FROM builder AS migration
+
+# 运行镜像仅保留生产依赖，避免携带构建工具。
+FROM builder AS runtime-builder
 RUN npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runner
@@ -24,9 +30,9 @@ RUN sed -i 's|http://deb.debian.org|http://mirrors.tencent.com|g; s|http://secur
 WORKDIR /app
 ENV NODE_ENV=production
 
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/prisma ./prisma
+COPY --from=runtime-builder /app/node_modules ./node_modules
+COPY --from=runtime-builder /app/dist ./dist
+COPY --from=runtime-builder /app/prisma ./prisma
 COPY package.json ./
 
 EXPOSE 3000

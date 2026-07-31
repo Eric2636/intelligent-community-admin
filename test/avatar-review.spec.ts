@@ -40,9 +40,15 @@ function fakeService(
       let count = 0;
       for (const row of rows) {
         const sameUser = !where.userId || row.userId === where.userId;
+        const exactId = typeof where.id === 'string' ? where.id : undefined;
         const excluded = (where.id as { not?: string } | undefined)?.not;
         const allowedStatuses = (where.status as { in?: string[] } | undefined)?.in;
-        if (sameUser && row.id !== excluded && (!allowedStatuses || allowedStatuses.includes(row.status))) {
+        if (
+          sameUser &&
+          (!exactId || row.id === exactId) &&
+          row.id !== excluded &&
+          (!allowedStatuses || allowedStatuses.includes(row.status))
+        ) {
           Object.assign(row, data);
           count += 1;
         }
@@ -142,11 +148,39 @@ test('pass applies only the latest pending avatar and duplicate callbacks are id
   ]);
 
   await service.handleResult({ traceId: 'trace-1', errcode: 0, suggest: 'pass', label: 100 });
-  await service.handleResult({ traceId: 'trace-1', errcode: 0, suggest: 'pass', label: 100 });
+  const duplicate = await service.handleResult({ traceId: 'trace-1', errcode: 0, suggest: 'pass', label: 100 });
 
   assert.deepEqual(applied, ['https://cdn.example.com/new.jpg']);
   assert.deepEqual(invalidated, ['done']);
   assert.equal(rows[0]?.status, 'PASSED');
+  assert.equal(duplicate.handled, true);
+});
+
+test('unknown callback asks the sender to retry instead of silently losing an early result', async () => {
+  const { service } = fakeService();
+  assert.deepEqual(
+    await service.handleResult({ traceId: 'not-persisted-yet', errcode: 0, suggest: 'pass' }),
+    { handled: false, status: 'NOT_FOUND' },
+  );
+});
+
+test('a review with no callback eventually fails closed and retains the old avatar', async () => {
+  const { service, rows, applied } = fakeService([
+    {
+      id: 'timed-out',
+      userId: 'user-1',
+      mediaUrl: 'https://cdn.example.com/pending.jpg',
+      traceId: 'trace-timeout',
+      status: 'PENDING',
+      createdAt: new Date(Date.now() - 36 * 60 * 1000),
+    },
+  ]);
+  assert.deepEqual(await service.getStatus('user-1', 'timed-out'), {
+    id: 'timed-out',
+    status: 'FAILED',
+  });
+  assert.equal(rows[0]?.status, 'FAILED');
+  assert.deepEqual(applied, []);
 });
 
 test('risky and review results retain the old avatar', async () => {

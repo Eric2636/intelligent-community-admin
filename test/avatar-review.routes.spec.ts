@@ -17,3 +17,9 @@ test('avatar upload submits the public URL with the authenticated user and openi
   assert.match(source, /avatarReviewService\.submit\(\{[\s\S]*?userId,[\s\S]*?openid: ctx\.state\.user!\.openid,[\s\S]*?mediaUrl: uploaded\.url/);
   assert.match(source, /ctx\.body = \{ \.\.\.uploaded, avatarReview \}/);
 });
+
+test('callback returns a retryable error when its trace id is not persisted yet', async () => {
+  const source = await readFile(new URL('../src/routes/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /const handled = await avatarReviewService\.handleResult\(result\)/);
+  assert.match(source, /if \(!handled\.handled\) throw new HttpError\(503/);
+});

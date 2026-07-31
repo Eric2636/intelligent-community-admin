@@ -24,6 +24,7 @@ type Dependencies = {
 const securityClient = new WechatContentSecurityClient({
   getAccessToken: () => wechatAccessTokenService.getAccessToken(),
 });
+const AVATAR_REVIEW_TIMEOUT_MS = 35 * 60 * 1000;
 
 export class AvatarReviewService {
   private readonly database: AvatarReviewDatabase;
@@ -85,12 +86,23 @@ export class AvatarReviewService {
   async getStatus(userId: string, id: string) {
     const review = await this.database.avatarReview.findUnique({ where: { id } });
     if (!review || review.userId !== userId) throw new HttpError(404, '头像审核记录不存在');
+    if (
+      ['SUBMITTING', 'PENDING'].includes(review.status) &&
+      review.createdAt.getTime() <= Date.now() - AVATAR_REVIEW_TIMEOUT_MS
+    ) {
+      const expired = await this.database.avatarReview.updateMany({
+        where: { id: review.id, userId, status: { in: ['SUBMITTING', 'PENDING'] } },
+        data: { status: 'FAILED', completedAt: new Date() },
+      });
+      if (expired.count) return { id: review.id, status: 'FAILED' };
+    }
     return { id: review.id, status: review.status };
   }
 
   async handleResult(params: { traceId: string; errcode: number; suggest?: string; label?: number }) {
     const review = await this.database.avatarReview.findUnique({ where: { traceId: params.traceId } });
-    if (!review || review.status !== 'PENDING') return { handled: false };
+    if (!review) return { handled: false, status: 'NOT_FOUND' };
+    if (review.status !== 'PENDING') return { handled: true, status: review.status };
     if (params.errcode !== 0) {
       await this.database.avatarReview.update({
         where: { id: review.id },

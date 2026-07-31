@@ -98,7 +98,8 @@ export function createRouter() {
   router.post('/api/wechat/content-security/callback', async (ctx) => {
     verifyContentSecurityCallback(ctx);
     const result = parseWechatMediaCheckResult(jsonBody(ctx), String(process.env.WX_APPID || '').trim());
-    await avatarReviewService.handleResult(result);
+    const handled = await avatarReviewService.handleResult(result);
+    if (!handled.handled) throw new HttpError(503, '头像审核结果暂未就绪');
     ctx.type = 'text/plain';
     ctx.body = 'success';
   });

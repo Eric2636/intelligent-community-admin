@@ -15,6 +15,7 @@ type Review = {
 function fakeService(
   initial: Review[] = [],
   submitAvatar: (params: { mediaUrl: string }) => Promise<{ traceId: string }> = async () => ({ traceId: `trace-${Date.now()}` }),
+  beforeApply: () => Promise<void> = async () => {},
 ) {
   const rows = initial.map((row) => ({ ...row }));
   const applied: string[] = [];
@@ -80,6 +81,7 @@ function fakeService(
     submitAvatar,
     lockUser: async () => {},
     applyAvatar: async ({ mediaUrl }) => {
+      await beforeApply();
       applied.push(mediaUrl);
       return { forumPostIds: [], mallItemIds: [] };
     },
@@ -207,6 +209,49 @@ test('a review with no callback eventually fails closed and retains the old avat
   });
   assert.equal(rows[0]?.status, 'FAILED');
   assert.deepEqual(applied, []);
+});
+
+test('timeout cannot report failure while a serialized pass later applies the avatar', async () => {
+  let signalApplyStarted;
+  let releaseApply;
+  const applyStarted = new Promise((resolve) => {
+    signalApplyStarted = resolve;
+  });
+  const applyGate = new Promise((resolve) => {
+    releaseApply = resolve;
+  });
+  const { service, rows, applied } = fakeService(
+    [
+      {
+        id: 'expiring',
+        userId: 'user-1',
+        mediaUrl: 'https://cdn.example.com/expiring.jpg',
+        traceId: 'trace-expiring',
+        status: 'PENDING',
+        createdAt: new Date(Date.now() - 36 * 60 * 1000),
+      },
+    ],
+    undefined,
+    async () => {
+      signalApplyStarted();
+      await applyGate;
+    },
+  );
+  const callback = service.handleResult({
+    traceId: 'trace-expiring',
+    errcode: 0,
+    suggest: 'pass',
+  });
+  await applyStarted;
+  const status = service.getStatus('user-1', 'expiring');
+  await Promise.resolve();
+  releaseApply();
+  const [callbackResult, statusResult] = await Promise.all([callback, status]);
+
+  assert.equal(callbackResult.status, 'PASSED');
+  assert.deepEqual(statusResult, { id: 'expiring', status: 'PASSED' });
+  assert.equal(rows[0]?.status, 'PASSED');
+  assert.deepEqual(applied, ['https://cdn.example.com/expiring.jpg']);
 });
 
 test('risky and review results retain the old avatar', async () => {

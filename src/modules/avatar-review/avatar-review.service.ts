@@ -90,11 +90,21 @@ export class AvatarReviewService {
       ['SUBMITTING', 'PENDING'].includes(review.status) &&
       review.createdAt.getTime() <= Date.now() - AVATAR_REVIEW_TIMEOUT_MS
     ) {
-      const expired = await this.database.avatarReview.updateMany({
-        where: { id: review.id, userId, status: { in: ['SUBMITTING', 'PENDING'] } },
-        data: { status: 'FAILED', completedAt: new Date() },
+      return this.database.$transaction(async (tx) => {
+        await this.lockUser(tx, userId);
+        const current = await tx.avatarReview.findUnique({ where: { id: review.id } });
+        if (!current || current.userId !== userId) throw new HttpError(404, '头像审核记录不存在');
+        if (!['SUBMITTING', 'PENDING'].includes(current.status)) {
+          return { id: current.id, status: current.status };
+        }
+        const expired = await tx.avatarReview.updateMany({
+          where: { id: current.id, userId, status: { in: ['SUBMITTING', 'PENDING'] } },
+          data: { status: 'FAILED', completedAt: new Date() },
+        });
+        if (expired.count) return { id: current.id, status: 'FAILED' };
+        const resolved = await tx.avatarReview.findUnique({ where: { id: current.id } });
+        return { id: current.id, status: resolved?.status || current.status };
       });
-      if (expired.count) return { id: review.id, status: 'FAILED' };
     }
     return { id: review.id, status: review.status };
   }

@@ -30,6 +30,24 @@ model User {
   @@index([enabled, createdAt])
 }
 
+model AvatarReview {
+  id            String    @id @default(cuid())
+  userId        String
+  mediaUrl      String    @db.Text
+  traceId       String?   @unique
+  status        String    @db.VarChar(24)
+  suggest       String?   @db.VarChar(24)
+  label         Int?
+  wechatErrcode Int?
+  completedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @default(now()) @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([userId, status, createdAt])
+  @@map("avatar_reviews")
+}
+
 model Feedback {
   id        String   @id @default(cuid())
   userId    String

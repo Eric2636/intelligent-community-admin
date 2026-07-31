@@ -60,6 +60,15 @@ npm test
 - `20260726120000_simplify_feedback`：新建最小纯文本 `feedbacks` 表和按用户/时间查询所需索引，不包含图片字段。
 - `20260726130000_add_notification_center`：新增 `notifications`、`system_notice_publications`，为 `Task`、`MallOrder` 增加 `version`，并为订单增加 `clientRequestId` 及 `(buyerId, clientRequestId)` 复合唯一约束。
 - `20260726160000_add_api_access_logging`：新增接口注册、普通访问日志和 5xx 错误日志三张表，以及按时间、IP、接口、方法、来源、状态、操作者和耗时使用的索引。
+- `20260731191000_add_avatar_reviews`：新增头像异步内容安全审核记录、微信 trace ID 唯一约束及按用户、状态和时间查询所需索引。
+
+## 头像内容安全审核
+
+- 小程序头像上传到 `module=avatar` 后，API 调用微信 `mediaCheckAsync`（`media_type=2`、`version=2`、`scene=1`）；上传结果在审核完成前不会写入用户头像。
+- 微信返回 `pass` 时才更新用户头像和历史内容快照；`risky`、`review`、接口错误及超时均保留旧头像。后到达的旧审核结果不能覆盖更新的头像请求。
+- 生产环境必须配置随机且保密的 `WX_MESSAGE_TOKEN`。微信公众平台消息推送地址配置为 `https://lllhjh.asia/api/wechat/content-security/callback`，令牌与该环境变量完全一致，消息加密方式选择明文模式，数据格式选择 JSON。
+- 回调 GET 用于微信签名验证，POST 接收异步结果；接口同时校验 SHA-1 签名和 `WX_APPID`，不要在日志或仓库中记录令牌。
+- 发布前需使用“微信头像”和“自定义”两个入口分别真机验证：页面先显示“头像审核中，通过后自动生效”，通过后自动刷新；未通过或服务异常时只显示通用提示且旧头像不变。
 
 当前项目尚未上线。2026-07-28 已备份并迁移本机 `127.0.0.1:3308/ic_test`，11 条迁移状态为最新，跑腿四张专属表仅从该本地库删除。测试和生产数据库仍必须先确认目标、备份并验证后再迁移；不要在未确认数据库目标时运行 `prisma migrate dev` 或 `prisma migrate deploy`。
 

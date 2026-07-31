@@ -119,22 +119,32 @@ export class AvatarReviewService {
     }
     const outcome = await this.database.$transaction(async (tx) => {
       await this.lockUser(tx, review.userId);
+      const current = await tx.avatarReview.findUnique({ where: { id: review.id } });
+      if (!current) return { status: 'NOT_FOUND' as const };
+      if (current.status !== 'PENDING') return { status: current.status };
       const latest = await tx.avatarReview.findFirst({
-        where: { userId: review.userId, status: 'PENDING' },
+        where: { userId: review.userId },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       });
-      if (!latest || latest.id !== review.id) {
-        await tx.avatarReview.update({ where: { id: review.id }, data: { status: 'SUPERSEDED', completedAt: new Date() } });
-        return null;
+      if (!latest || latest.id !== current.id) {
+        await tx.avatarReview.updateMany({
+          where: { id: current.id, status: 'PENDING' },
+          data: { status: 'SUPERSEDED', completedAt: new Date() },
+        });
+        return { status: 'SUPERSEDED' as const };
       }
-      const cacheTargets = await this.applyAvatar({ tx, userId: review.userId, mediaUrl: review.mediaUrl });
+      const cacheTargets = await this.applyAvatar({
+        tx,
+        userId: current.userId,
+        mediaUrl: current.mediaUrl,
+      });
       await tx.avatarReview.update({
-        where: { id: review.id },
+        where: { id: current.id },
         data: { status: 'PASSED', suggest: 'pass', label: params.label, wechatErrcode: 0, completedAt: new Date() },
       });
-      return cacheTargets;
+      return { status: 'PASSED' as const, cacheTargets };
     });
-    if (outcome) await this.invalidateAvatarCaches(outcome);
-    return { handled: true, status: outcome ? 'PASSED' : 'SUPERSEDED' };
+    if (outcome.cacheTargets) await this.invalidateAvatarCaches(outcome.cacheTargets);
+    return { handled: true, status: outcome.status };
   }
 }

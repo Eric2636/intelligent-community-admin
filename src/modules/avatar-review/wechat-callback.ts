@@ -14,8 +14,12 @@ export function verifyWechatCallbackSignature(params: {
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
-export function validateWechatCallbackConfiguration(appEnv?: string, token?: string) {
-  if (appEnv === 'production' && !String(token || '').trim()) {
+export function validateWechatCallbackConfiguration(
+  appEnv?: string,
+  token?: string,
+  nodeEnv = process.env.NODE_ENV,
+) {
+  if ((appEnv === 'production' || nodeEnv === 'production') && !String(token || '').trim()) {
     throw new Error('生产环境必须配置 WX_MESSAGE_TOKEN');
   }
 }

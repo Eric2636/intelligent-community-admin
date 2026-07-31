@@ -118,4 +118,8 @@ test('production refuses to start without a callback verification token', () => 
   assert.throws(() => validateWechatCallbackConfiguration('production', ''), /WX_MESSAGE_TOKEN/);
   assert.doesNotThrow(() => validateWechatCallbackConfiguration('production', 'random-secret-token'));
   assert.doesNotThrow(() => validateWechatCallbackConfiguration('development', ''));
+  assert.throws(
+    () => validateWechatCallbackConfiguration('development', '', 'production'),
+    /WX_MESSAGE_TOKEN/,
+  );
 });

@@ -67,8 +67,13 @@ function fakeService(
     user: {
       findUnique: async () => ({ openid: 'openid-1' }),
     },
-    $transaction: async <T>(callback: (tx: { avatarReview: typeof delegate }) => Promise<T>) =>
-      callback({ avatarReview: delegate }),
+    $transaction: undefined as unknown as <T>(callback: (tx: { avatarReview: typeof delegate }) => Promise<T>) => Promise<T>,
+  };
+  let transactionTail = Promise.resolve();
+  database.$transaction = <T>(callback: (tx: { avatarReview: typeof delegate }) => Promise<T>) => {
+    const run = transactionTail.then(() => callback({ avatarReview: delegate }));
+    transactionTail = run.then(() => undefined, () => undefined);
+    return run;
   };
   const service = new AvatarReviewService({
     database: database as never,
@@ -156,6 +161,27 @@ test('pass applies only the latest pending avatar and duplicate callbacks are id
   assert.equal(duplicate.handled, true);
 });
 
+test('concurrent duplicate pass callbacks apply once and remain passed', async () => {
+  const { service, rows, applied, invalidated } = fakeService([
+    {
+      id: 'review-concurrent',
+      userId: 'user-1',
+      mediaUrl: 'https://cdn.example.com/concurrent.jpg',
+      traceId: 'trace-concurrent',
+      status: 'PENDING',
+      createdAt: new Date(2_000),
+    },
+  ]);
+  const outcomes = await Promise.all([
+    service.handleResult({ traceId: 'trace-concurrent', errcode: 0, suggest: 'pass' }),
+    service.handleResult({ traceId: 'trace-concurrent', errcode: 0, suggest: 'pass' }),
+  ]);
+  assert.deepEqual(applied, ['https://cdn.example.com/concurrent.jpg']);
+  assert.deepEqual(invalidated, ['done']);
+  assert.equal(rows[0]?.status, 'PASSED');
+  assert.deepEqual(outcomes.map((item) => item.status), ['PASSED', 'PASSED']);
+});
+
 test('unknown callback asks the sender to retry instead of silently losing an early result', async () => {
   const { service } = fakeService();
   assert.deepEqual(
@@ -223,6 +249,30 @@ test('an older late pass can never overwrite a newer pending avatar', async () =
 
   await service.handleResult({ traceId: 'trace-old', errcode: 0, suggest: 'pass', label: 100 });
 
+  assert.deepEqual(applied, []);
+  assert.equal(rows.find((row) => row.id === 'old')?.status, 'SUPERSEDED');
+});
+
+test('an older pass cannot apply after a newer upload has failed closed', async () => {
+  const { service, rows, applied } = fakeService([
+    {
+      id: 'old',
+      userId: 'user-1',
+      mediaUrl: 'https://cdn.example.com/old.jpg',
+      traceId: 'trace-old',
+      status: 'PENDING',
+      createdAt: new Date(1_000),
+    },
+    {
+      id: 'new-failed',
+      userId: 'user-1',
+      mediaUrl: 'https://cdn.example.com/new.jpg',
+      traceId: 'trace-new',
+      status: 'FAILED',
+      createdAt: new Date(2_000),
+    },
+  ]);
+  await service.handleResult({ traceId: 'trace-old', errcode: 0, suggest: 'pass' });
   assert.deepEqual(applied, []);
   assert.equal(rows.find((row) => row.id === 'old')?.status, 'SUPERSEDED');
 });

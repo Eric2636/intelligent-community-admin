@@ -1,10 +1,16 @@
 import Router from '@koa/router';
 import jwt from 'jsonwebtoken';
+import { HttpError } from '../http-error';
 import { parseMultipartForm } from '../lib/multipart-form';
 import { jwtAuth } from '../middleware/jwt-auth';
 import { AdminService } from '../modules/admin/admin.service';
 import { WechatLoginDto, WechatPhoneLoginDto } from '../modules/auth/auth.dto';
 import { AuthService } from '../modules/auth/auth.service';
+import { AvatarReviewService } from '../modules/avatar-review/avatar-review.service';
+import {
+  parseWechatMediaCheckResult,
+  verifyWechatCallbackSignature,
+} from '../modules/avatar-review/wechat-callback';
 import { ReportMiniApiErrorLogDto } from '../modules/client-log/client-log.dto';
 import { ClientLogService } from '../modules/client-log/client-log.service';
 import {
@@ -45,6 +51,7 @@ const uploadService = new UploadService();
 const settingsService = new SettingsService();
 const mallService = new MallService();
 const clientLogService = new ClientLogService();
+const avatarReviewService = new AvatarReviewService();
 const uploadMaxBytes = Number(process.env.UPLOAD_MAX_BYTES || String(100 * 1024 * 1024));
 
 function tryGetUserFromBearer(auth?: string) {
@@ -59,11 +66,42 @@ function tryGetUserFromBearer(auth?: string) {
   }
 }
 
+function queryString(value: unknown) {
+  return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+}
+
+function verifyContentSecurityCallback(ctx: { query: Record<string, unknown> }) {
+  const token = String(process.env.WX_MESSAGE_TOKEN || '').trim();
+  if (!token) throw new Error('后端未配置 WX_MESSAGE_TOKEN');
+  const valid = verifyWechatCallbackSignature({
+    token,
+    timestamp: queryString(ctx.query.timestamp),
+    nonce: queryString(ctx.query.nonce),
+    signature: queryString(ctx.query.signature),
+  });
+  if (!valid) throw new HttpError(403, '微信回调签名无效');
+}
+
 export function createRouter() {
   const router = new Router();
 
   router.get('/api/health', (ctx) => {
     ctx.body = { ok: true };
+  });
+
+  router.get('/api/wechat/content-security/callback', (ctx) => {
+    verifyContentSecurityCallback(ctx);
+    ctx.type = 'text/plain';
+    ctx.body = queryString(ctx.query.echostr);
+  });
+
+  router.post('/api/wechat/content-security/callback', async (ctx) => {
+    verifyContentSecurityCallback(ctx);
+    const result = parseWechatMediaCheckResult(jsonBody(ctx), String(process.env.WX_APPID || '').trim());
+    const handled = await avatarReviewService.handleResult(result);
+    if (!handled.handled) throw new HttpError(503, '头像审核结果暂未就绪');
+    ctx.type = 'text/plain';
+    ctx.body = 'success';
   });
 
   registerAdminRoutes(router, adminService, settingsService, clientLogService);
@@ -102,6 +140,12 @@ export function createRouter() {
     const userId = ctx.state.user!.userId;
     const dto = await parseDto(UpdateMeDto, jsonBody(ctx));
     ctx.body = await userService.updateMe(userId, dto);
+  });
+
+  router.get('/api/user/avatar-reviews/:reviewId', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const reviewId = String((ctx.params as { reviewId?: string }).reviewId || '').trim();
+    ctx.body = await avatarReviewService.getStatus(userId, reviewId);
   });
 
   // 小区留言（帖子）列表
@@ -427,7 +471,7 @@ export function createRouter() {
       ctx.body = { statusCode: 400, message: '缺少上传文件' };
       return;
     }
-    ctx.body = await uploadService.uploadMedia({
+    const uploaded = await uploadService.uploadMedia({
       userId,
       module: form.fields.module,
       type: form.fields.type,
@@ -436,6 +480,16 @@ export function createRouter() {
       contentType: file.contentType,
       buffer: file.buffer,
     });
+    if (form.fields.module !== 'avatar') {
+      ctx.body = uploaded;
+      return;
+    }
+    const avatarReview = await avatarReviewService.submit({
+      userId,
+      openid: ctx.state.user!.openid,
+      mediaUrl: uploaded.url,
+    });
+    ctx.body = { ...uploaded, avatarReview };
   });
 
   router.get('/api/files/presign', jwtAuth, async (ctx) => {

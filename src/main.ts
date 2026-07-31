@@ -10,6 +10,7 @@ import { apiAccessLog } from './middleware/api-access-log';
 import { errorHandler } from './middleware/error-handler';
 import { AdminService } from './modules/admin/admin.service';
 import { syncRegisteredApiEndpoints } from './modules/api-log/api-endpoint.service';
+import { validateWechatCallbackConfiguration } from './modules/avatar-review/wechat-callback';
 import { validateDefaultAvatarConfiguration } from './modules/user/default-avatar';
 import { createRouter } from './routes';
 import { openApiDocument } from './swagger/openapi';
@@ -39,6 +40,7 @@ function logRuntimeEnvironment() {
 
 async function bootstrap() {
   validateDefaultAvatarConfiguration(process.env.APP_ENV, process.env.DEFAULT_AVATAR_URL);
+  validateWechatCallbackConfiguration(process.env.APP_ENV, process.env.WX_MESSAGE_TOKEN);
   logRuntimeEnvironment();
   await prisma.$connect();
   await new AdminService().ensureDefaultSuperAdmin();

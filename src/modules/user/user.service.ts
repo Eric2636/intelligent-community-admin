@@ -1,13 +1,20 @@
 import type { Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
-import { isImageMediaUrl, parseStrictMediaUrlList } from '../../lib/media-url';
+import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import { adminDisplayLabelForContent } from '../admin/admin.service';
 import { contentIdentityTag } from './user-identity';
-import { runUserProfileUpdate } from './user-profile-sync';
+import { runUserProfileUpdate, type UserProfileSnapshotChanges } from './user-profile-sync';
 import type { UpdateMeDto } from './user.dto';
 
 const MAX_USER_PHOTOS = 20;
+
+export function editableProfileSnapshotChanges(dto: UpdateMeDto): UserProfileSnapshotChanges {
+  return {
+    ...(dto.name !== undefined ? { name: dto.name } : {}),
+    ...(dto.identityType !== undefined ? { identityType: dto.identityType } : {}),
+  };
+}
 
 export class UserService {
   async getMe(userId: string) {
@@ -51,10 +58,6 @@ export class UserService {
   }
 
   async updateMe(userId: string, dto: UpdateMeDto) {
-    if (dto.avatar != null && String(dto.avatar).trim() !== '') {
-      const a = String(dto.avatar).trim();
-      if (!isImageMediaUrl(a)) throw new HttpError(400, '头像仅支持图片链接');
-    }
     const photos =
       dto.photos === undefined
         ? undefined
@@ -62,11 +65,7 @@ export class UserService {
 
     return runUserProfileUpdate({
       userId,
-      changes: {
-        ...(dto.name !== undefined ? { name: dto.name } : {}),
-        ...(dto.avatar !== undefined ? { avatar: dto.avatar } : {}),
-        ...(dto.identityType !== undefined ? { identityType: dto.identityType } : {}),
-      },
+      changes: editableProfileSnapshotChanges(dto),
       complete: (tx) =>
         tx.user.update({
           where: { id: userId },

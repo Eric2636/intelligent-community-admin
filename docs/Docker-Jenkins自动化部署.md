@@ -113,6 +113,7 @@ vim .env
 生产环境推荐配置：
 
 ```env
+APP_ENV=production
 PORT=3000
 
 DATABASE_URL=mysql://community_user:强密码@mysql:3306/intelligent_community?charset=utf8mb4
@@ -126,6 +127,7 @@ REDIS_COMMAND_TIMEOUT_MS=5000
 
 WX_APPID=你的微信小程序AppID
 WX_APPSECRET=你的微信小程序密钥
+WX_MESSAGE_TOKEN=微信消息推送中配置的随机长Token
 
 JWT_SECRET=生产环境随机长密钥
 JWT_EXPIRES_IN=7d
@@ -144,6 +146,8 @@ COS_PRESIGN_EXPIRES_SECONDS=600
 注意：
 
 - `.env` 只放在服务器，不要提交到 Git。
+- `APP_ENV=production` 与镜像内的 `NODE_ENV=production` 必须同时保持为生产值；任一生产标记生效时，缺少 `WX_MESSAGE_TOKEN` 都会拒绝启动。
+- 微信公众平台消息推送 URL 配置为 `https://你的生产域名/api/wechat/content-security/callback`，Token 与 `WX_MESSAGE_TOKEN` 完全一致，使用明文模式和 JSON 数据格式。
 - `DATABASE_URL` 中的主机名使用 `mysql`，这是 Docker Compose 内部服务名。
 - `REDIS_HOST` 使用 `redis`，也是 Docker Compose 内部服务名。
 

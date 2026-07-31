@@ -6,6 +6,7 @@ export class UpdateMeDto {
   @IsString()
   name?: string;
 
+  /** 兼容旧版小程序请求；服务端不会据此更新头像。 */
   @IsOptional()
   @IsString()
   avatar?: string;

@@ -9,3 +9,4 @@ dist
 !.env.development.example
 !.env.local.example
 .idea
+.worktrees/

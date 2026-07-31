@@ -30,6 +30,51 @@ model User {
   @@index([enabled, createdAt])
 }
 
+model Feedback {
+  id        String   @id @default(cuid())
+  userId    String
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@map("feedbacks")
+}
+
+/// 用户站内通知；业务写入必须与对应状态变化共用同一事务
+model Notification {
+  id          String    @id @default(cuid())
+  recipientId String
+  actorId     String?
+  type        String    @db.VarChar(48)
+  bizType     String    @db.VarChar(32)
+  bizId       String?   @db.VarChar(191)
+  title       String    @db.VarChar(191)
+  content     String    @db.Text
+  dedupeKey   String    @db.VarChar(255)
+  readAt      DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@unique([recipientId, dedupeKey])
+  @@index([recipientId, deletedAt, createdAt])
+  @@index([recipientId, readAt, deletedAt])
+  @@index([bizType, bizId])
+  @@map("notifications")
+}
+
+/// 超级管理员系统通知发布意图；用于跨请求幂等，不保存通知正文
+model SystemNoticePublication {
+  id             String   @id @db.VarChar(64)
+  adminId        String   @db.VarChar(191)
+  payloadHash    String   @db.Char(64)
+  recipientCount Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  @@index([adminId, createdAt])
+  @@map("system_notice_publications")
+}
+
 model AdminUser {
   id           String    @id @default(cuid())
   username     String    @unique
@@ -55,12 +100,14 @@ model AdminSystemLog {
   adminUsername String
   ip            String
   action        String
+  moduleKey     String?
   detail        Json?
   createdAt     DateTime @default(now())
 
   @@index([createdAt])
   @@index([adminId, createdAt])
   @@index([action, createdAt])
+  @@index([adminId, moduleKey, createdAt])
   @@map("admin_system_logs")
 }
 
@@ -92,33 +139,86 @@ model MiniProgramApiErrorLog {
   @@map("mini_program_api_error_logs")
 }
 
+/// API 路由注册表；method 由注册服务规范化为大写，routePattern 按大小写区分
+model ApiEndpoint {
+  id           String   @id @default(cuid()) @db.VarChar(191)
+  source       String   @db.VarChar(24)
+  method       String   @db.VarChar(16)
+  routePattern String   @db.VarChar(512)
+  description  String?  @db.VarChar(500)
+  logEnabled   Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+
+  @@unique([method, routePattern])
+  @@index([source, logEnabled])
+  @@index([updatedAt])
+  @@map("api_endpoints")
+}
+
+/// 统一接口请求日志；错误字段仅在 4xx/5xx 时保存脱敏诊断信息。
+model ApiRequestLog {
+  id              BigInt   @id @default(autoincrement())
+  requestId       String   @db.VarChar(64)
+  endpointId      String?  @db.VarChar(191)
+  source          String   @db.VarChar(24)
+  method          String   @db.VarChar(16)
+  routePattern    String   @db.VarChar(512)
+  requestUrl      String?  @db.Text
+  ip              String?  @db.VarChar(64)
+  userId          String?  @db.VarChar(191)
+  adminId         String?  @db.VarChar(191)
+  httpStatus      Int
+  businessCode    Int?
+  durationMs      Int
+  errorCode       String?  @db.VarChar(96)
+  errorSummary    String?  @db.Text
+  requestSnapshot Json?
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([requestId])
+  @@index([ip, createdAt])
+  @@index([endpointId, createdAt])
+  @@index([method, createdAt])
+  @@index([source, createdAt])
+  @@index([httpStatus, createdAt])
+  @@index([userId, createdAt])
+  @@index([adminId, createdAt])
+  @@index([durationMs, createdAt])
+  @@map("api_request_logs")
+}
+
 model Task {
-  id            String     @id @default(cuid())
-  title         String
-  desc          String     @db.Text
-  images        Json?
-  videos        Json?
-  reward        String?
-  location      Json?
-  status        TaskStatus @default(PENDING_TAKE)
-  visibility    ContentVisibility @default(ONLINE)
-  pinned        Boolean    @default(false)
-  publisherId   String
-  publisherName String?
+  id                String            @id @default(cuid())
+  title             String
+  desc              String            @db.Text
+  images            Json?
+  videos            Json?
+  reward            String?
+  location          Json?
+  status            TaskStatus        @default(PENDING_TAKE)
+  version           Int               @default(0)
+  visibility        ContentVisibility @default(ONLINE)
+  pinned            Boolean           @default(false)
+  publisherId       String
+  publisherName     String?
+  publisherAvatar   String?
   publisherIdentity String?
   /// 后台发布标签：所属单位或“网站管理员”
-  adminLabel    String?
+  adminLabel        String?
   /// 标记内容由哪个后台管理员创建（用于审计/展示）
-  createdByAdminId String?
-  takerId       String?
-  takerName     String?
-  proofText     String?    @db.Text
-  proofImages   Json?
-  deletedAt     DateTime?
-  createdAt     DateTime   @default(now())
-  claimedAt     DateTime?
-  completedAt   DateTime?
-  confirmedAt   DateTime?
+  createdByAdminId  String?
+  takerId           String?
+  takerName         String?
+  takerAvatar       String?
+  proofText         String?           @db.Text
+  proofImages       Json?
+  deletedAt         DateTime?
+  createdAt         DateTime          @default(now())
+  claimedAt         DateTime?
+  completedAt       DateTime?
+  confirmedAt       DateTime?
 
   @@index([status, createdAt])
   @@index([visibility, pinned, createdAt])
@@ -128,107 +228,31 @@ model Task {
   @@index([createdByAdminId])
 }
 
-model Errand {
-  id           String       @id @default(cuid())
-  title        String
-  content      String       @db.Text
-  images       Json?
-  videos       Json?
-  reward       String?
-  status       ErrandStatus @default(PENDING_TAKE)
-  visibility   ContentVisibility @default(ONLINE)
-  authorId     String
-  authorName   String?
-  /// 后台发布标签：所属单位或“网站管理员”
-  adminLabel   String?
-  /// 标记内容由哪个后台管理员创建（用于审计/展示）
-  createdByAdminId String?
-  claimerId    String?
-  claimerName  String?
-  pinned       Boolean      @default(false)
-  viewCount    Int          @default(0)
-  likeCount    Int          @default(0)
-  replyCount   Int          @default(0)
-  deletedAt    DateTime?
-  createdAt    DateTime     @default(now())
-  claimedAt    DateTime?
-  completedAt  DateTime?
-
-  replies   ErrandReply[]
-  likes     ErrandLike[]
-  favorites ErrandFavorite[]
-
-  @@index([status, createdAt])
-  @@index([visibility, pinned, createdAt])
-  @@index([authorId, createdAt])
-  @@index([claimerId, claimedAt])
-  @@index([pinned, createdAt])
-  @@index([deletedAt])
-  @@index([createdByAdminId])
-}
-
-model ErrandReply {
-  id         String   @id @default(cuid())
-  errandId   String
-  authorId   String
-  authorName String?
-  content    String   @db.Text
-  createdAt  DateTime @default(now())
-
-  errand Errand @relation(fields: [errandId], references: [id], onDelete: Cascade)
-
-  @@index([errandId, createdAt])
-}
-
-model ErrandLike {
-  id        String   @id @default(cuid())
-  errandId  String
-  userId    String
-  createdAt DateTime @default(now())
-
-  errand Errand @relation(fields: [errandId], references: [id], onDelete: Cascade)
-
-  @@unique([errandId, userId])
-  @@index([userId, createdAt])
-}
-
-model ErrandFavorite {
-  id        String   @id @default(cuid())
-  errandId  String
-  userId    String
-  createdAt DateTime @default(now())
-
-  errand Errand @relation(fields: [errandId], references: [id], onDelete: Cascade)
-
-  @@unique([errandId, userId])
-  @@index([userId, createdAt])
-}
-
 /// 小区留言（论坛帖子），对应小程序 forumAPI / api/posts
 model ForumPost {
-  id           String   @id @default(cuid())
-  title        String
-  content      String   @db.Text
-  images       Json?
-  videos       Json?
-  authorId     String
-  authorName   String?
-  authorAvatar String?
-  authorIdentity String?
+  id               String            @id @default(cuid())
+  title            String
+  content          String            @db.Text
+  images           Json?
+  videos           Json?
+  authorId         String
+  authorName       String?
+  authorAvatar     String?
+  authorIdentity   String?
   /// 后台发布标签：所属单位或“网站管理员”
-  adminLabel   String?
+  adminLabel       String?
   /// 标记内容由哪个后台管理员创建（用于审计/展示）
   createdByAdminId String?
-  postType     ForumPostType @default(NORMAL)
-  validUntil   DateTime?
-  visibility   ContentVisibility @default(ONLINE)
-  pinned       Boolean  @default(false)
-  viewCount    Int      @default(0)
-  likeCount    Int      @default(0)
-  replyCount   Int      @default(0)
-  shareCount   Int      @default(0)
-  deletedAt    DateTime?
-  createdAt    DateTime @default(now())
+  postType         ForumPostType     @default(NORMAL)
+  validUntil       DateTime?
+  visibility       ContentVisibility @default(ONLINE)
+  pinned           Boolean           @default(false)
+  viewCount        Int               @default(0)
+  likeCount        Int               @default(0)
+  replyCount       Int               @default(0)
+  shareCount       Int               @default(0)
+  deletedAt        DateTime?
+  createdAt        DateTime          @default(now())
 
   replies   ForumReply[]
   likes     ForumPostLike[]
@@ -244,30 +268,34 @@ model ForumPost {
 }
 
 model ForumReply {
-  id                String    @id @default(cuid())
+  id                String   @id @default(cuid())
   postId            String
   parentReplyId     String?
   /// 被回复人昵称快照（楼中楼展示「回复 @xxx」）
   replyToAuthorName String?
+  replyToUserId     String?
   authorId          String
   authorName        String?
+  authorAvatar      String?
   authorIdentity    String?
-  content           String    @db.Text
+  content           String   @db.Text
   images            Json?
   videos            Json?
-  likeCount         Int       @default(0)
-  favoriteCount     Int       @default(0)
-  createdAt         DateTime  @default(now())
+  likeCount         Int      @default(0)
+  favoriteCount     Int      @default(0)
+  createdAt         DateTime @default(now())
 
-  post      ForumPost @relation(fields: [postId], references: [id], onDelete: Cascade)
-  parent    ForumReply?  @relation("ForumReplyThread", fields: [parentReplyId], references: [id], onDelete: Cascade)
-  children  ForumReply[] @relation("ForumReplyThread")
+  post      ForumPost            @relation(fields: [postId], references: [id], onDelete: Cascade)
+  parent    ForumReply?          @relation("ForumReplyThread", fields: [parentReplyId], references: [id], onDelete: Cascade)
+  children  ForumReply[]         @relation("ForumReplyThread")
   likes     ForumReplyLike[]
   favorites ForumReplyFavorite[]
   reactions ForumReplyReaction[]
 
   @@index([postId, createdAt])
   @@index([parentReplyId, createdAt])
+  @@index([authorId])
+  @@index([replyToUserId])
   @@map("forum_replies")
 }
 
@@ -368,35 +396,37 @@ model MallCategory {
 }
 
 model MallItem {
-  id           String   @id @default(cuid())
-  categoryId   String
-  title        String
-  price        String?
-  unit         String   @default("元")
-  desc         String   @db.Text
-  contact      String?
-  locationName String?
-  locationAddress String? @db.Text
-  latitude     Float?
-  longitude    Float?
+  id               String            @id @default(cuid())
+  categoryId       String
+  title            String
+  price            String?
+  unit             String            @default("元")
+  desc             String            @db.Text
+  contact          String?
+  locationName     String?
+  locationAddress  String?           @db.Text
+  latitude         Float?
+  longitude        Float?
   /// 主图（用于列表封面 + 详情轮播），最多 6 张（后端校验）
-  mainImages   Json?
+  mainImages       Json?
   /// 副图（用于详情轮播），与主图合计最多 6 张（后端校验）
-  subImages    Json?
+  subImages        Json?
   /// 视频列表（用于详情展示），数量/大小由上传层控制
-  videos       Json?
+  videos           Json?
   /// 兼容旧字段（历史数据可能仍写入该字段）
-  images       Json?
-  publisherId  String
+  images           Json?
+  publisherId      String
+  publisherName    String?
+  publisherAvatar  String?
   /// 后台发布标签：所属单位或“网站管理员”
-  adminLabel   String?
+  adminLabel       String?
   /// 标记内容由哪个后台管理员创建（用于审计/展示）
   createdByAdminId String?
-  visibility   ContentVisibility @default(ONLINE)
-  pinned       Boolean  @default(false)
-  deletedAt    DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @default(now()) @updatedAt
+  visibility       ContentVisibility @default(ONLINE)
+  pinned           Boolean           @default(false)
+  deletedAt        DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @default(now()) @updatedAt
 
   favorites MallItemFavorite[]
   orders    MallOrder[]
@@ -412,25 +442,29 @@ model MallItem {
 
 /// 小区市场商品评论
 model MallItemComment {
-  id        String   @id @default(cuid())
-  itemId    String
-  userId    String
+  id                String   @id @default(cuid())
+  itemId            String
+  userId            String
   /// 楼中楼：仅允许回复「主评论」（parentId 为空的那条）
-  parentId  String?
+  parentId          String?
   /// 被回复人昵称快照（展示「回复 @xxx」）
   replyToAuthorName String?
-  content   String   @db.Text
-  images    Json?
-  createdAt DateTime @default(now())
+  replyToUserId     String?
+  authorName        String?
+  authorAvatar      String?
+  content           String   @db.Text
+  images            Json?
+  createdAt         DateTime @default(now())
 
-  item     MallItem            @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  parent   MallItemComment?    @relation("MallItemCommentThread", fields: [parentId], references: [id], onDelete: Cascade)
-  children MallItemComment[]   @relation("MallItemCommentThread")
+  item     MallItem              @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  parent   MallItemComment?      @relation("MallItemCommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  children MallItemComment[]     @relation("MallItemCommentThread")
   likes    MallItemCommentLike[]
 
   @@index([itemId, parentId, createdAt])
   @@index([itemId, createdAt])
   @@index([userId, createdAt])
+  @@index([replyToUserId])
   @@map("mall_item_comments")
 }
 
@@ -462,20 +496,27 @@ model MallItemFavorite {
 
 /// pending | completed | cancelled（与小程序订单状态一致）
 model MallOrder {
-  id         String   @id @default(cuid())
-  itemId     String
-  itemTitle  String
-  itemPrice  String?
-  itemUnit   String   @default("元")
-  sellerId   String
-  buyerId    String
-  contact    String?
-  status     String   @default("pending")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @default(now()) @updatedAt
+  id              String   @id @default(cuid())
+  itemId          String
+  itemTitle       String
+  itemPrice       String?
+  itemUnit        String   @default("元")
+  sellerId        String
+  sellerName      String?
+  sellerAvatar    String?
+  buyerId         String
+  buyerName       String?
+  buyerAvatar     String?
+  contact         String?
+  clientRequestId String   @db.VarChar(64)
+  status          String   @default("pending")
+  version         Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
 
   item MallItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
 
+  @@unique([buyerId, clientRequestId])
   @@index([buyerId, createdAt])
   @@index([sellerId, createdAt])
   @@index([status, createdAt])
@@ -509,10 +550,4 @@ enum TaskStatus {
   PENDING_CONFIRM
   COMPLETED
   CANCELLED
-}
-
-enum ErrandStatus {
-  PENDING_TAKE
-  IN_PROGRESS
-  COMPLETED
 }

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "test": "tsx --test test/*.spec.ts",
     "start": "node dist/main.js",
     "start:dev": "cross-env APP_ENV=development tsc-watch -p tsconfig.build.json --onSuccess \"node dist/main.js\"",
     "start:dev:local": "cross-env APP_ENV=local tsc-watch -p tsconfig.build.json --onSuccess \"node dist/main.js\"",
@@ -17,7 +18,8 @@
     "prisma:studio": "dotenv -e .env.development -e .env -- prisma studio",
     "prisma:studio:local": "dotenv -e .env.local -e .env -- prisma studio",
     "reset-super-admin-password": "dotenv -e .env.development -e .env -- tsx scripts/reset-super-admin-password.ts",
-    "reset-super-admin-password:local": "dotenv -e .env.local -e .env -- tsx scripts/reset-super-admin-password.ts"
+    "reset-super-admin-password:local": "dotenv -e .env.local -e .env -- tsx scripts/reset-super-admin-password.ts",
+    "cleanup-api-logs": "tsx scripts/cleanup-api-logs.ts"
   },
   "dependencies": {
     "@koa/cors": "^5.0.0",

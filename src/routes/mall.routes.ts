@@ -1,5 +1,5 @@
 import Router from '@koa/router';
-import { jwtAuth } from '../middleware/jwt-auth';
+import { jwtAuth, optionalJwtAuth } from '../middleware/jwt-auth';
 import { CreateMallItemCommentDto } from '../modules/mall/mall-comment.dto';
 import {
   CreateMallOrderDto,
@@ -12,14 +12,15 @@ import { parseDto } from '../validate';
 import { jsonBody } from './json-body';
 
 export function registerMallRoutes(router: Router, mallService: MallService) {
-  router.get('/api/categories', jwtAuth, async (ctx) => {
+  router.get('/api/categories', optionalJwtAuth, async (ctx) => {
     const data = await mallService.listCategories();
     ctx.body = { code: 200, data };
   });
 
-  router.get('/api/items', jwtAuth, async (ctx) => {
+  router.get('/api/items', optionalJwtAuth, async (ctx) => {
     const q = await parseDto(GetMallItemsQueryDto, ctx.query);
     const data = await mallService.listItems({
+      userId: ctx.state.user?.userId,
       categoryId: q.categoryId,
       keyword: q.keyword,
       orderBy: q.orderBy,
@@ -39,8 +40,8 @@ export function registerMallRoutes(router: Router, mallService: MallService) {
     ctx.body = { code: 200, data };
   });
 
-  router.get('/api/items/:itemId', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
+  router.get('/api/items/:itemId', optionalJwtAuth, async (ctx) => {
+    const userId = ctx.state.user?.userId;
     const itemId = String((ctx.params as { itemId?: string }).itemId || '').trim();
     const data = await mallService.getItemDetail({ userId, itemId });
     ctx.body = { code: 200, data };
@@ -89,11 +90,8 @@ export function registerMallRoutes(router: Router, mallService: MallService) {
     const data = await mallService.createOrder({
       buyerId,
       itemId: dto.itemId,
-      itemTitle: dto.itemTitle,
-      itemPrice: dto.itemPrice,
-      itemUnit: dto.itemUnit,
-      sellerId: dto.sellerId,
-      contact: dto.contact,
+      clientRequestId: dto.clientRequestId,
+      buyerContact: dto.buyerContact,
     });
     ctx.body = { code: 200, data };
   });
@@ -120,8 +118,8 @@ export function registerMallRoutes(router: Router, mallService: MallService) {
   });
 
   // —— 小区市场评论 ——（item comments）
-  router.get('/api/items/:itemId/comments', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
+  router.get('/api/items/:itemId/comments', optionalJwtAuth, async (ctx) => {
+    const userId = ctx.state.user?.userId;
     const itemId = String((ctx.params as { itemId?: string }).itemId || '').trim();
     const data = await mallService.listItemComments({ itemId, userId });
     ctx.body = { code: 200, data };

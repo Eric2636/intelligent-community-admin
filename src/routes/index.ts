@@ -8,14 +8,6 @@ import { AuthService } from '../modules/auth/auth.service';
 import { ReportMiniApiErrorLogDto } from '../modules/client-log/client-log.dto';
 import { ClientLogService } from '../modules/client-log/client-log.service';
 import {
-  ClaimErrandDto,
-  GetErrandsQueryDto,
-  GetMyErrandsQueryDto,
-  PublishErrandDto,
-  PublishErrandReplyDto,
-} from '../modules/errand/errand.dto';
-import { ErrandService } from '../modules/errand/errand.service';
-import {
   GetForumAnnouncementsQueryDto,
   GetForumPostsQueryDto,
   PublishForumPostDto,
@@ -39,14 +31,15 @@ import { UpdateMeDto } from '../modules/user/user.dto';
 import { UserService } from '../modules/user/user.service';
 import { parseDto } from '../validate';
 import { registerAdminRoutes } from './admin.routes';
+import { registerFeedbackRoutes } from './feedback.routes';
 import { jsonBody } from './json-body';
 import { registerMallRoutes } from './mall.routes';
+import { registerNotificationRoutes } from './notification.routes';
 
 const adminService = new AdminService();
 const authService = new AuthService();
 const userService = new UserService();
 const taskService = new TaskService();
-const errandService = new ErrandService();
 const forumService = new ForumService();
 const uploadService = new UploadService();
 const settingsService = new SettingsService();
@@ -74,6 +67,8 @@ export function createRouter() {
   });
 
   registerAdminRoutes(router, adminService, settingsService, clientLogService);
+  registerFeedbackRoutes(router);
+  registerNotificationRoutes(router);
 
   router.post('/api/logs/mini-api-errors', async (ctx) => {
     const dto = await parseDto(ReportMiniApiErrorLogDto, jsonBody(ctx));
@@ -263,101 +258,6 @@ export function createRouter() {
     ctx.body = { code: 200, data: await forumService.share({ postId }) };
   });
 
-  // 跑腿列表
-  router.get('/api/errands', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const q = await parseDto(GetErrandsQueryDto, ctx.query);
-    const page = q.page ?? 1;
-    const pageSize = q.pageSize ?? 10;
-    const data = await errandService.listErrands({
-      userId,
-      page,
-      pageSize,
-      keyword: q.keyword,
-      orderBy: q.orderBy,
-    });
-    ctx.body = { code: 200, data };
-  });
-
-  // 我的跑腿（注意：要放在 /api/errands/:errandId 之前，避免被参数路由吞掉）
-  router.get('/api/errands/my', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const q = await parseDto(GetMyErrandsQueryDto, ctx.query);
-    const data = await errandService.getMyErrands({ userId, role: q.role });
-    ctx.body = { code: 200, data };
-  });
-
-  // 跑腿详情
-  router.get('/api/errands/:errandId', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const errandId = String((ctx.params as { errandId?: string }).errandId || '').trim();
-    const data = await errandService.getErrandDetail({ userId, errandId });
-    ctx.body = { code: 200, data };
-  });
-
-  // 发布跑腿
-  router.post('/api/errands', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const dto = await parseDto(PublishErrandDto, jsonBody(ctx));
-    const data = await errandService.publishErrand({
-      userId,
-      title: dto.title,
-      content: dto.content,
-      reward: dto.reward,
-    });
-    ctx.body = { code: 200, data };
-  });
-
-  // 领取跑腿
-  router.post('/api/errands/:errandId/claim', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const errandId = String((ctx.params as { errandId?: string }).errandId || '').trim();
-    const dto = await parseDto(ClaimErrandDto, jsonBody(ctx));
-    const data = await errandService.claimErrand({ userId, errandId, claimerName: dto.claimerName });
-    ctx.body = { code: 200, data };
-  });
-
-  // 发布者确认完成
-  router.post('/api/errands/:errandId/complete', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const errandId = String((ctx.params as { errandId?: string }).errandId || '').trim();
-    const data = await errandService.completeErrand({ userId, errandId });
-    ctx.body = { code: 200, data };
-  });
-
-  // 回复
-  router.post('/api/errands/:errandId/replies', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const errandId = String((ctx.params as { errandId?: string }).errandId || '').trim();
-    const dto = await parseDto(PublishErrandReplyDto, jsonBody(ctx));
-    const data = await errandService.publishReply({ userId, errandId, content: dto.content });
-    ctx.body = { code: 200, data };
-  });
-
-  // 点赞/取消点赞
-  router.post('/api/errands/:errandId/like', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const errandId = String((ctx.params as { errandId?: string }).errandId || '').trim();
-    ctx.body = { code: 200, data: await errandService.like({ userId, errandId }) };
-  });
-  router.delete('/api/errands/:errandId/like', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const errandId = String((ctx.params as { errandId?: string }).errandId || '').trim();
-    ctx.body = { code: 200, data: await errandService.unlike({ userId, errandId }) };
-  });
-
-  // 收藏/取消收藏
-  router.post('/api/errands/:errandId/favorite', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const errandId = String((ctx.params as { errandId?: string }).errandId || '').trim();
-    ctx.body = { code: 200, data: await errandService.favorite({ userId, errandId }) };
-  });
-  router.delete('/api/errands/:errandId/favorite', jwtAuth, async (ctx) => {
-    const userId = ctx.state.user!.userId;
-    const errandId = String((ctx.params as { errandId?: string }).errandId || '').trim();
-    ctx.body = { code: 200, data: await errandService.unfavorite({ userId, errandId }) };
-  });
-
   router.get('/api/tasks', async (ctx) => {
     const q = await parseDto(GetTasksQueryDto, ctx.query);
     const page = q.page ?? 1;
@@ -424,6 +324,14 @@ export function createRouter() {
     const userId = ctx.state.user!.userId;
     const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
     const data = await taskService.confirmComplete({ taskId, userId });
+    ctx.body = { code: 200, data };
+  });
+
+  // 发布者驳回接单人的完成提交，保留凭证并退回进行中
+  router.post('/api/tasks/:taskId/reject-complete', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const taskId = String((ctx.params as { taskId?: string }).taskId || '').trim();
+    const data = await taskService.rejectComplete({ taskId, userId });
     ctx.body = { code: 200, data };
   });
 

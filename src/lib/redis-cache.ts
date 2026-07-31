@@ -9,9 +9,6 @@ export const TASK_PENDING_LIST_TTL_SEC = 120;
 const FORUM_POST_LIST_VER_KEY = 'ic:v1:forum:posts:ver';
 export const FORUM_POST_LIST_TTL_SEC = 120;
 
-const ERRAND_LIST_VER_KEY = 'ic:v1:errand:list:ver';
-export const ERRAND_LIST_TTL_SEC = 120;
-
 let client: Redis | null = null;
 let clientInit = false;
 
@@ -180,69 +177,6 @@ export async function invalidateForumPostRepliesCache(postId: string): Promise<v
     await r.incr(forumPostRepliesVerKey(id));
   } catch (e) {
     console.warn('[redis] forum post replies ver', e);
-  }
-}
-
-async function getErrandListVersion(): Promise<string> {
-  const r = getRedis();
-  if (!r) return '0';
-  try {
-    return (await r.get(ERRAND_LIST_VER_KEY)) ?? '0';
-  } catch {
-    return '0';
-  }
-}
-
-export async function errandListCacheKey(
-  page: number,
-  pageSize: number,
-  keyword: string,
-  orderBy: string,
-): Promise<string> {
-  const ver = await getErrandListVersion();
-  const kw = (keyword || '').trim();
-  const ord = orderBy || 'time';
-  return `ic:v1:errand:list:${ver}:${page}:${pageSize}:${ord}:${encodeURIComponent(kw)}`;
-}
-
-export async function invalidateErrandListCache(): Promise<void> {
-  const r = getRedis();
-  if (!r) return;
-  try {
-    await r.incr(ERRAND_LIST_VER_KEY);
-  } catch (e) {
-    console.warn('[redis] incr errand list ver', e);
-  }
-}
-
-function errandRepliesVerKey(errandId: string): string {
-  return `ic:v1:errand:${errandId}:replies-ver`;
-}
-
-export const ERRAND_REPLIES_TTL_SEC = 120;
-
-export async function errandRepliesDataCacheKey(errandId: string): Promise<string> {
-  const r = getRedis();
-  let ver = '0';
-  if (r) {
-    try {
-      ver = (await r.get(errandRepliesVerKey(errandId))) ?? '0';
-    } catch {
-      ver = '0';
-    }
-  }
-  return `ic:v1:errand:${errandId}:replies:${ver}`;
-}
-
-export async function invalidateErrandRepliesCache(errandId: string): Promise<void> {
-  const id = String(errandId || '').trim();
-  if (!id) return;
-  const r = getRedis();
-  if (!r) return;
-  try {
-    await r.incr(errandRepliesVerKey(id));
-  } catch (e) {
-    console.warn('[redis] errand replies ver', e);
   }
 }
 

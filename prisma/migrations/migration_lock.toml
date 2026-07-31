@@ -1,0 +1,2 @@
+# This file is required by Prisma migration commands to identify the database provider.
+provider = "mysql"

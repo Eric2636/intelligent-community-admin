@@ -14,10 +14,10 @@ export type UserProfileSnapshotChanges = {
   identityType?: string | null;
 };
 
-type ProfileSyncTransaction = Prisma.TransactionClient;
+export type ProfileSyncTransaction = Prisma.TransactionClient;
 type ProfileSyncDatabase = Pick<PrismaClient, '$transaction'>;
 
-type ProfileCacheTargets = {
+export type ProfileCacheTargets = {
   forumPostIds: string[];
   mallItemIds: string[];
 };
@@ -37,6 +37,29 @@ const defaultCacheInvalidators: ProfileCacheInvalidators = {
   invalidateMallList: invalidateMallItemsListCache,
   invalidateMallItemDetail: invalidateMallItemDetailCache,
 };
+
+export async function invalidateUserProfileCaches(
+  changes: UserProfileSnapshotChanges,
+  cacheTargets: ProfileCacheTargets,
+  cacheInvalidators: ProfileCacheInvalidators = defaultCacheInvalidators,
+) {
+  const nameChanged = changes.name !== undefined;
+  const avatarChanged = changes.avatar !== undefined;
+  const identityChanged = changes.identityType !== undefined;
+  if (nameChanged || avatarChanged || identityChanged) {
+    await cacheInvalidators.invalidateTaskList();
+    await cacheInvalidators.invalidateForumList();
+    for (const postId of cacheTargets.forumPostIds) {
+      await cacheInvalidators.invalidateForumReplies(postId);
+    }
+  }
+  if (nameChanged || avatarChanged) {
+    await cacheInvalidators.invalidateMallList();
+    for (const itemId of cacheTargets.mallItemIds) {
+      await cacheInvalidators.invalidateMallItemDetail(itemId);
+    }
+  }
+}
 
 export async function lockUsersForProfileSnapshot(
   tx: Pick<ProfileSyncTransaction, '$queryRaw'>,
@@ -217,21 +240,6 @@ export async function runUserProfileUpdate<T>(
     return { result, cacheTargets: sync.cacheTargets };
   });
 
-  const nameChanged = params.changes.name !== undefined;
-  const avatarChanged = params.changes.avatar !== undefined;
-  const identityChanged = params.changes.identityType !== undefined;
-  if (nameChanged || avatarChanged || identityChanged) {
-    await cacheInvalidators.invalidateTaskList();
-    await cacheInvalidators.invalidateForumList();
-    for (const postId of outcome.cacheTargets.forumPostIds) {
-      await cacheInvalidators.invalidateForumReplies(postId);
-    }
-  }
-  if (nameChanged || avatarChanged) {
-    await cacheInvalidators.invalidateMallList();
-    for (const itemId of outcome.cacheTargets.mallItemIds) {
-      await cacheInvalidators.invalidateMallItemDetail(itemId);
-    }
-  }
+  await invalidateUserProfileCaches(params.changes, outcome.cacheTargets, cacheInvalidators);
   return outcome.result;
 }

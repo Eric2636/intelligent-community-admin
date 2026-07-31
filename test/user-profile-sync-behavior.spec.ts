@@ -207,7 +207,7 @@ test('row lock helper locks unique user ids in deterministic order', async () =>
   assert.deepEqual(lockedIds, ['user-a', 'user-b']);
 });
 
-test('existing wechat login delegates name and avatar changes to the shared profile runner', async () => {
+test('existing wechat login ignores unreviewed avatar URLs and delegates only safe profile changes', async () => {
   const captured: Array<{
     userId: string;
     changes: UserProfileSnapshotChanges;
@@ -231,7 +231,6 @@ test('existing wechat login delegates name and avatar changes to the shared prof
       userId: 'user-1',
       changes: {
         name: '微信昵称',
-        avatar: 'https://cdn.example.com/wechat.png',
       },
     },
   ]);
@@ -392,7 +391,6 @@ test('repeated login atomically obtains the existing user and synchronizes chang
       userId: 'user-1',
       changes: {
         name: '新昵称',
-        avatar: 'https://cdn.example.com/new.png',
       },
     },
   ]);

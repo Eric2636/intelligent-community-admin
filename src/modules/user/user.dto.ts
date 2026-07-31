@@ -7,10 +7,6 @@ export class UpdateMeDto {
   name?: string;
 
   @IsOptional()
-  @IsString()
-  avatar?: string;
-
-  @IsOptional()
   @IsIn(USER_IDENTITY_TYPES)
   identityType?: UserIdentityType;
 

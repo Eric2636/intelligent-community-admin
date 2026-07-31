@@ -4,6 +4,7 @@ import jwt, { type SignOptions } from 'jsonwebtoken';
 import { HttpError } from '../../http-error';
 import { prisma } from '../../lib/prisma';
 import { runUserProfileUpdate } from '../user/user-profile-sync';
+import { wechatAccessTokenService } from '../wechat/wechat-access-token';
 import type { WechatLoginDto, WechatPhoneLoginDto } from './auth.dto';
 
 type JsCode2SessionResponse = {
@@ -18,13 +19,6 @@ type WechatSession = JsCode2SessionResponse & {
   openid: string;
 };
 
-type WechatAccessTokenResponse = {
-  access_token?: string;
-  expires_in?: number;
-  errcode?: number;
-  errmsg?: string;
-};
-
 type WechatPhoneNumberResponse = {
   errcode?: number;
   errmsg?: string;
@@ -34,9 +28,6 @@ type WechatPhoneNumberResponse = {
     countryCode?: string;
   };
 };
-
-let cachedAccessToken = '';
-let cachedAccessTokenExpiresAt = 0;
 
 const userSelect = {
   id: true,
@@ -72,12 +63,10 @@ export function updateExistingWechatUser(
   runner: ExistingWechatProfileRunner = runUserProfileUpdate,
 ): Promise<WechatUser> {
   const nickName = profile.nickName ? String(profile.nickName).trim() : '';
-  const avatarUrl = profile.avatarUrl ? String(profile.avatarUrl).trim() : '';
   return runner({
     userId,
     changes: {
       ...(nickName ? { name: nickName } : {}),
-      ...(avatarUrl ? { avatar: avatarUrl } : {}),
     },
     complete: (tx) =>
       tx.user.update({
@@ -95,13 +84,11 @@ export async function upsertWechatLoginUser(
   runner: ExistingWechatProfileRunner = runUserProfileUpdate,
 ): Promise<WechatUser> {
   const nickName = profile.nickName ? String(profile.nickName).trim() : '';
-  const avatarUrl = profile.avatarUrl ? String(profile.avatarUrl).trim() : '';
   const user = await database.user.upsert({
     where: { openid },
     create: {
       openid,
       name: nickName || `用户${Math.floor(Math.random() * 10000)}`,
-      avatar: avatarUrl || undefined,
       gender: profile.gender ?? 0,
     },
     update: {},
@@ -110,7 +97,6 @@ export async function upsertWechatLoginUser(
 
   const profileChanged =
     (nickName !== '' && user.name !== nickName) ||
-    (avatarUrl !== '' && user.avatar !== avatarUrl) ||
     (profile.gender !== undefined && user.gender !== profile.gender);
   if (!profileChanged) return user;
   return updateExistingWechatUser(user.id, profile, runner);
@@ -171,37 +157,6 @@ export class AuthService {
     return { ...data, openid: data.openid };
   }
 
-  private async getWechatAccessToken() {
-    const now = Date.now();
-    if (cachedAccessToken && cachedAccessTokenExpiresAt - now > 60_000) return cachedAccessToken;
-
-    const appid = process.env.WX_APPID;
-    const secret = process.env.WX_APPSECRET;
-    if (!appid || !secret) {
-      throw new HttpError(401, '后端未配置 WX_APPID/WX_APPSECRET');
-    }
-
-    const r = await axios.get<WechatAccessTokenResponse>('https://api.weixin.qq.com/cgi-bin/token', {
-      params: {
-        grant_type: 'client_credential',
-        appid,
-        secret,
-      },
-      timeout: 10_000,
-    });
-    const data = r.data || {};
-    if (!data.access_token) {
-      throw new HttpError(
-        401,
-        data.errmsg ? `微信 access_token 获取失败：${data.errmsg}` : '微信 access_token 获取失败',
-      );
-    }
-
-    cachedAccessToken = data.access_token;
-    cachedAccessTokenExpiresAt = now + Math.max(60, Number(data.expires_in || 7200) - 120) * 1000;
-    return cachedAccessToken;
-  }
-
   private signToken(user: { id: string; openid: string }) {
     const expiresIn = process.env.JWT_EXPIRES_IN ?? '7d';
     const secretKey = process.env.JWT_SECRET;
@@ -237,7 +192,7 @@ export class AuthService {
       phoneCode: maskCode(dto.phoneCode),
     });
     const session = await this.code2Session(dto.code);
-    const accessToken = await this.getWechatAccessToken();
+    const accessToken = await wechatAccessTokenService.getAccessToken();
     const r = await axios.post<WechatPhoneNumberResponse>(
       `https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=${encodeURIComponent(accessToken)}`,
       { code: dto.phoneCode },

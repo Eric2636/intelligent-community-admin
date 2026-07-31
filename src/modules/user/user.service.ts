@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
-import { isImageMediaUrl, parseStrictMediaUrlList } from '../../lib/media-url';
+import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import { adminDisplayLabelForContent } from '../admin/admin.service';
 import { contentIdentityTag } from './user-identity';
@@ -51,10 +51,6 @@ export class UserService {
   }
 
   async updateMe(userId: string, dto: UpdateMeDto) {
-    if (dto.avatar != null && String(dto.avatar).trim() !== '') {
-      const a = String(dto.avatar).trim();
-      if (!isImageMediaUrl(a)) throw new HttpError(400, '头像仅支持图片链接');
-    }
     const photos =
       dto.photos === undefined
         ? undefined
@@ -64,7 +60,6 @@ export class UserService {
       userId,
       changes: {
         ...(dto.name !== undefined ? { name: dto.name } : {}),
-        ...(dto.avatar !== undefined ? { avatar: dto.avatar } : {}),
         ...(dto.identityType !== undefined ? { identityType: dto.identityType } : {}),
       },
       complete: (tx) =>

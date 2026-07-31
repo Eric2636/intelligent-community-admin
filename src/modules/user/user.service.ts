@@ -4,10 +4,17 @@ import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import { adminDisplayLabelForContent } from '../admin/admin.service';
 import { contentIdentityTag } from './user-identity';
-import { runUserProfileUpdate } from './user-profile-sync';
+import { runUserProfileUpdate, type UserProfileSnapshotChanges } from './user-profile-sync';
 import type { UpdateMeDto } from './user.dto';
 
 const MAX_USER_PHOTOS = 20;
+
+export function editableProfileSnapshotChanges(dto: UpdateMeDto): UserProfileSnapshotChanges {
+  return {
+    ...(dto.name !== undefined ? { name: dto.name } : {}),
+    ...(dto.identityType !== undefined ? { identityType: dto.identityType } : {}),
+  };
+}
 
 export class UserService {
   async getMe(userId: string) {
@@ -58,10 +65,7 @@ export class UserService {
 
     return runUserProfileUpdate({
       userId,
-      changes: {
-        ...(dto.name !== undefined ? { name: dto.name } : {}),
-        ...(dto.identityType !== undefined ? { identityType: dto.identityType } : {}),
-      },
+      changes: editableProfileSnapshotChanges(dto),
       complete: (tx) =>
         tx.user.update({
           where: { id: userId },

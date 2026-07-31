@@ -9,6 +9,7 @@ import {
   verifyWechatCallbackSignature,
 } from '../src/modules/avatar-review/wechat-callback';
 import { UpdateMeDto } from '../src/modules/user/user.dto';
+import { editableProfileSnapshotChanges } from '../src/modules/user/user.service';
 import { parseDto } from '../src/validate';
 
 test('mediaCheckAsync submits the required avatar scene payload', async () => {
@@ -105,11 +106,12 @@ test('callback payload accepts only the configured app and extracts review outco
   );
 });
 
-test('ordinary profile update rejects avatar and cannot bypass content review', async () => {
-  await assert.rejects(
-    () => parseDto(UpdateMeDto, { avatar: 'https://cdn.example.com/unreviewed.jpg' }),
-    /property avatar should not exist/,
-  );
+test('ordinary profile update accepts legacy avatar payloads but ignores them', async () => {
+  const dto = await parseDto(UpdateMeDto, {
+    name: '新名字',
+    avatar: 'https://cdn.example.com/unreviewed.jpg',
+  });
+  assert.deepEqual(editableProfileSnapshotChanges(dto), { name: '新名字' });
 });
 
 test('production refuses to start without a callback verification token', () => {

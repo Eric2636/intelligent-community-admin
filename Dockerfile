@@ -2,7 +2,7 @@
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 
-RUN apt-get update \
+RUN apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
@@ -25,7 +25,7 @@ RUN npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runner
 
-RUN apt-get update \
+RUN apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update \
   && apt-get install -y --no-install-recommends openssl ca-certificates default-mysql-client \
   && rm -rf /var/lib/apt/lists/*
 

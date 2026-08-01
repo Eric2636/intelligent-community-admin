@@ -103,6 +103,7 @@ model AdminUser {
   /// 绑定的小程序 User.id；普通管理员仅能增删改以该身份发布的内容
   boundUserId  String?
   enabled      Boolean   @default(true)
+  sessionVersion Int     @default(0)
   lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @default(now()) @updatedAt

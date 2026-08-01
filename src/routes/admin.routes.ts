@@ -22,6 +22,7 @@ import { redactPath } from '../modules/api-log/api-log-redaction';
 import { registerApiLogRoutes } from '../modules/api-log/api-log.routes';
 import { MiniApiErrorLogQueryDto } from '../modules/client-log/client-log.dto';
 import { ClientLogService } from '../modules/client-log/client-log.service';
+import { registerDatabaseRoutes } from '../modules/database/database.routes';
 import { MallCategoryService } from '../modules/mall/mall-category.service';
 import { UpdateModuleTabEnabledDto } from '../modules/settings/settings.dto';
 import { SettingsService } from '../modules/settings/settings.service';
@@ -56,6 +57,7 @@ export function registerAdminRoutes(
 ) {
   registerApiLogRoutes(router);
   registerAdminSystemNoticeRoute(router);
+  registerDatabaseRoutes(router);
 
   router.get('/api/admin/auth/captcha', async (ctx) => {
     const data = await adminService.createLoginCaptcha();

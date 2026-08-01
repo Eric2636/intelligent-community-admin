@@ -29,6 +29,7 @@ export function describeApiEndpoint(endpoint: Pick<RegisteredApiEndpoint, 'metho
       : path.includes('/tasks') ? '业主互助'
         : path.includes('/notifications') ? '消息通知'
           : path.includes('/feedback') ? '意见反馈'
+            : path.includes('/database') ? '数据库管理'
             : path.startsWith('/api/admin') ? '后台管理'
               : path.includes('/auth') ? '身份认证' : '社区基础服务';
   const action = endpoint.method === 'GET' ? '查询'

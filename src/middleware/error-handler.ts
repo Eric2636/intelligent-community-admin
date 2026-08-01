@@ -15,7 +15,11 @@ export async function errorHandler(ctx: Koa.Context, next: Koa.Next) {
       const status = err instanceof HttpError ? err.status : koaStatus!;
       const message = err instanceof HttpError || expose ? (err as Error).message : 'Bad Request';
       ctx.status = status;
-      ctx.body = { statusCode: status, message };
+      ctx.body = {
+        statusCode: status,
+        message,
+        ...(err instanceof HttpError && err.reason ? { reason: err.reason } : {}),
+      };
       return;
     }
     console.error('[api-error]', {

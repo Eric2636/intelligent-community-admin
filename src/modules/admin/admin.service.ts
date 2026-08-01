@@ -32,6 +32,7 @@ import {
   setAdminLastIp,
   getAdminLastIp,
 } from './admin-login-security';
+import { AdminSessionReplacedError, openAdminSession } from './admin-session';
 import type { AdminCreateContentDto, AdminUpdateContentDto } from './admin.dto';
 
 type AdminTokenPayload = {
@@ -39,6 +40,7 @@ type AdminTokenPayload = {
   username: string;
   role: 'ADMIN' | 'SUPERADMIN';
   typ: 'access' | 'refresh';
+  sessionVersion: number;
 };
 
 type AdminLoginFailureBody = {
@@ -100,6 +102,7 @@ function adminSelect() {
     orgName: true,
     boundUserId: true,
     enabled: true,
+    sessionVersion: true,
     lastLoginAt: true,
     createdAt: true,
     updatedAt: true,
@@ -108,7 +111,13 @@ function adminSelect() {
 
 function mapAdmin(row: Prisma.AdminUserGetPayload<{ select: ReturnType<typeof adminSelect> }>) {
   return {
-    ...row,
+    id: row.id,
+    username: row.username,
+    role: row.role,
+    type: row.type,
+    orgName: row.orgName,
+    boundUserId: row.boundUserId,
+    enabled: row.enabled,
     lastLoginAt: row.lastLoginAt ? row.lastLoginAt.toISOString() : '',
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -401,10 +410,12 @@ export class AdminService {
 
     const expiresIn = process.env.ADMIN_JWT_EXPIRES_IN || '3h';
     const refreshExpiresIn = process.env.ADMIN_REFRESH_JWT_EXPIRES_IN || '3h';
+    const session = await openAdminSession(prisma.adminUser, admin.id);
     const basePayload = {
       sub: admin.id,
       username: admin.username,
       role: admin.role,
+      sessionVersion: session.sessionVersion,
     } satisfies Omit<AdminTokenPayload, 'typ'>;
     const signOpts: SignOptions = {
       expiresIn: expiresIn as SignOptions['expiresIn'],
@@ -414,11 +425,11 @@ export class AdminService {
     };
     const token = jwt.sign({ ...basePayload, typ: 'access' }, secret, signOpts);
     const refreshToken = jwt.sign({ ...basePayload, typ: 'refresh' }, secret, refreshSignOpts);
-    const updated = await prisma.adminUser.update({
+    const updated = await prisma.adminUser.findUnique({
       where: { id: admin.id },
-      data: { lastLoginAt: new Date() },
       select: adminSelect(),
     });
+    if (!updated) throw new HttpError(404, '管理员不存在');
 
     return {
       token,
@@ -451,6 +462,9 @@ export class AdminService {
     });
     if (!admin) throw new HttpError(404, '管理员不存在');
     if (!admin.enabled) throw new HttpError(403, '管理员账号已停用');
+    if (!Number.isInteger(payload.sessionVersion) || payload.sessionVersion !== admin.sessionVersion) {
+      throw new AdminSessionReplacedError();
+    }
 
     const expiresIn = process.env.ADMIN_JWT_EXPIRES_IN || '3h';
     const accessPayload: AdminTokenPayload = {
@@ -458,6 +472,7 @@ export class AdminService {
       username: admin.username,
       role: admin.role,
       typ: 'access',
+      sessionVersion: admin.sessionVersion,
     };
     const token = jwt.sign(accessPayload, secret, {
       expiresIn: expiresIn as SignOptions['expiresIn'],
@@ -485,7 +500,7 @@ export class AdminService {
     const passwordHash = await bcrypt.hash(password, 10);
     await prisma.adminUser.update({
       where: { id: adminId },
-      data: { passwordHash },
+      data: { passwordHash, sessionVersion: { increment: 1 } },
       select: { id: true },
     });
     return { ok: true };
@@ -738,6 +753,7 @@ export class AdminService {
     if (params.password && id !== operatorId) {
       throw new HttpError(403, '仅能修改自己的登录密码');
     }
+    const shouldInvalidateSession = Boolean(params.password) || (target.enabled && params.enabled === false);
 
     const nextType = params.type ?? target.type;
     const nextOrgName = params.orgName === undefined ? (target.orgName ?? '') : params.orgName?.trim() || '';
@@ -770,6 +786,7 @@ export class AdminService {
       data: {
         ...(params.password ? { passwordHash: await bcrypt.hash(params.password, 10) } : {}),
         ...(params.enabled === undefined ? {} : { enabled: params.enabled }),
+        ...(shouldInvalidateSession ? { sessionVersion: { increment: 1 } } : {}),
         ...(params.type ? { type: params.type } : {}),
         ...(params.orgName === undefined && nextType !== 'OFFICIAL'
           ? {}
@@ -797,7 +814,7 @@ export class AdminService {
     const passwordHash = await bcrypt.hash(plain, 10);
     await prisma.adminUser.update({
       where: { id },
-      data: { passwordHash },
+      data: { passwordHash, sessionVersion: { increment: 1 } },
       select: { id: true },
     });
     return { password: plain, username: target.username };

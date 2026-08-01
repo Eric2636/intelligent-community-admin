@@ -19,7 +19,8 @@ export function validateWechatCallbackConfiguration(
   token?: string,
   nodeEnv = process.env.NODE_ENV,
 ) {
-  if ((appEnv === 'production' || nodeEnv === 'production') && !String(token || '').trim()) {
+  const effectiveEnv = String(appEnv || '').trim() || nodeEnv;
+  if (effectiveEnv === 'production' && !String(token || '').trim()) {
     throw new Error('生产环境必须配置 WX_MESSAGE_TOKEN');
   }
 }

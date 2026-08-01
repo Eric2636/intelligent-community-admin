@@ -15,6 +15,8 @@ const DEDICATED_AUDIT_ROUTES = new Set([
   '/api/admin/system-notices',
   '/api/admin/contents/:type/:id/state',
   '/api/admin/contents/:type/state/batch',
+  '/api/admin/database/backup-settings',
+  '/api/admin/database/backup-jobs',
 ]);
 
 function routePattern(ctx: Koa.Context) {

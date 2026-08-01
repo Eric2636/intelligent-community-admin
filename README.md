@@ -72,6 +72,19 @@ npm test
 
 当前项目尚未上线。2026-07-28 已备份并迁移本机 `127.0.0.1:3308/ic_test`，11 条迁移状态为最新，跑腿四张专属表仅从该本地库删除。测试和生产数据库仍必须先确认目标、备份并验证后再迁移；不要在未确认数据库目标时运行 `prisma migrate dev` 或 `prisma migrate deploy`。
 
+## 数据库运维管理
+
+- 仅超级管理员可访问 `/api/admin/database/*`。
+- 自动备份只接受“每小时 / 每 6 小时 / 每天”三种结构化计划，不接受原始 cron。
+- 手动与自动备份共用当前环境的最新文件；先写临时 gzip、校验后原子替换，失败保留上一份有效备份。
+- 测试与生产必须挂载不同的持久化目录，文件分别为 `ic_test_latest.sql.gz` 与 `ic_prod_latest.sql.gz`。
+- 数据表管理只读取 `information_schema` 的表和字段定义，不提供表内记录、SQL、恢复、下载、删除或修改功能。
+- 备份设置与手动备份接口进入统一管理员操作审计；所有调用进入接口监控。
+- API 与备份 Worker 必须作为两个独立进程运行：API 设置 `DATABASE_BACKUP_WORKER_ENABLED=false`，Worker 使用 `npm run start:backup` 且设置为 `true`。
+- Worker 使用独立的 `DATABASE_BACKUP_URL` 只读备份账号，并要求它、`DATABASE_URL` 与 `DATABASE_BACKUP_EXPECTED_DATABASE` 指向同一目标库；不匹配时拒绝启动。
+- 多实例通过数据库租约互斥执行。任务会记录计划时间、开始/结束时间、耗时与发起管理员；临时 gzip 经完整解压校验和落盘同步后才原子替换旧备份。
+- 数据表支持按表名、所属模块、用途说明搜索；字段抽屉同时展示列定义和索引定义。
+
 ## 安全与发布
 
 - 代码修改只在 `dev` 分支进行。

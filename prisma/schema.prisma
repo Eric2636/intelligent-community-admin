@@ -129,6 +129,57 @@ model AdminSystemLog {
   @@map("admin_system_logs")
 }
 
+/// 当前环境的数据库自动备份设置（单例记录）
+model DatabaseBackupSetting {
+  id              String          @id @default("default") @db.VarChar(32)
+  enabled         Boolean         @default(true)
+  frequency       BackupFrequency @default(HOURLY)
+  minute          Int             @default(5)
+  dailyHour       Int             @default(2)
+  lastScheduledAt DateTime?
+  updatedBy       String?         @db.VarChar(191)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @default(now()) @updatedAt
+
+  @@map("database_backup_settings")
+}
+
+/// 数据库备份执行记录；任务与最终备份文件分离，便于审计成功、失败与跳过状态
+model DatabaseBackupJob {
+  id                 String          @id @default(cuid())
+  triggerType        BackupTrigger
+  status             BackupJobStatus @default(PENDING)
+  /// 同一环境只允许一个 PENDING/RUNNING 任务；完成后清空
+  activeKey          String?         @unique @db.VarChar(32)
+  scheduleKey        String?         @unique @db.VarChar(64)
+  environment        String          @db.VarChar(32)
+  requestedByAdminId String?         @db.VarChar(191)
+  outputFileName     String?         @db.VarChar(255)
+  outputSizeBytes    BigInt?
+  errorMessage       String?         @db.Text
+  scheduledAt        DateTime        @default(now())
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  durationMs         Int?
+  createdAt          DateTime        @default(now())
+
+  @@index([status, createdAt])
+  @@index([triggerType, createdAt])
+  @@index([createdAt])
+  @@map("database_backup_jobs")
+}
+
+/// 数据库级备份执行租约；跨进程、跨实例保证同一环境只有一个执行器
+model DatabaseBackupLease {
+  environment String   @id @db.VarChar(32)
+  ownerToken  String   @db.VarChar(64)
+  expiresAt   DateTime
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([expiresAt])
+  @@map("database_backup_leases")
+}
+
 /// 小程序接口错误日志（后台可查看，用于定位 C 端接口报错）
 model MiniProgramApiErrorLog {
   id           String   @id @default(cuid())
@@ -549,6 +600,25 @@ enum AdminRole {
 enum AdminType {
   OFFICIAL
   THIRD_PARTY
+}
+
+enum BackupFrequency {
+  HOURLY
+  EVERY_6_HOURS
+  DAILY
+}
+
+enum BackupTrigger {
+  AUTO
+  MANUAL
+}
+
+enum BackupJobStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  SKIPPED
 }
 
 enum ContentVisibility {

@@ -5,7 +5,9 @@ import {
   CreateMallOrderDto,
   GetMallItemsQueryDto,
   PatchMallOrderDto,
+  PatchMallItemVisibilityDto,
   PublishMallItemDto,
+  UpdateMallItemDto,
 } from '../modules/mall/mall.dto';
 import { MallService } from '../modules/mall/mall.service';
 import { parseDto } from '../validate';
@@ -67,6 +69,29 @@ export function registerMallRoutes(router: Router, mallService: MallService) {
       videos: dto.videos,
       images: dto.images,
     });
+    ctx.body = { code: 200, data };
+  });
+
+  router.patch('/api/items/:itemId/visibility', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const itemId = String((ctx.params as { itemId?: string }).itemId || '').trim();
+    const dto = await parseDto(PatchMallItemVisibilityDto, jsonBody(ctx));
+    const data = await mallService.setItemVisibility({ userId, itemId, visibility: dto.visibility });
+    ctx.body = { code: 200, data };
+  });
+
+  router.patch('/api/items/:itemId', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const itemId = String((ctx.params as { itemId?: string }).itemId || '').trim();
+    const dto = await parseDto(UpdateMallItemDto, jsonBody(ctx));
+    const data = await mallService.updateItem({ userId, itemId, dto });
+    ctx.body = { code: 200, data };
+  });
+
+  router.delete('/api/items/:itemId', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const itemId = String((ctx.params as { itemId?: string }).itemId || '').trim();
+    const data = await mallService.deleteItem({ userId, itemId });
     ctx.body = { code: 200, data };
   });
 

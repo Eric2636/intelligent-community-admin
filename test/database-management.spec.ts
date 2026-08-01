@@ -32,6 +32,8 @@ test('runtime image contains a database dump client and the worker never invokes
   const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
   const worker = await readFile(new URL('../src/modules/database/database-backup.worker.ts', import.meta.url), 'utf8');
   assert.match(dockerfile, /default-mysql-client/);
+  assert.equal((dockerfile.match(/Acquire::ForceIPv4=true/g) || []).length, 2);
+  assert.equal((dockerfile.match(/Acquire::Retries=3/g) || []).length, 2);
   assert.match(worker, /spawn\(/);
   assert.doesNotMatch(worker, /shell:\s*true|exec\(/);
   assert.match(worker, /rename\(/);

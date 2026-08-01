@@ -41,6 +41,7 @@ test('runtime image contains a database dump client and the worker never invokes
   assert.match(worker, /createGunzip/);
   assert.match(worker, /DATABASE_BACKUP_URL/);
   assert.match(worker, /DATABASE_BACKUP_EXPECTED_DATABASE/);
+  assert.match(worker, /'--no-tablespaces'/);
   assert.match(worker, /databaseBackupLease/);
   assert.match(worker, /status: 'RUNNING'[\s\S]*status: 'FAILED'/);
   assert.match(worker, /服务重启，备份任务已中断/);

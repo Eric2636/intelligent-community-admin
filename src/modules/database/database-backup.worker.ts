@@ -77,6 +77,7 @@ async function runDump(config: BackupConfiguration, assertLease: () => Promise<v
   const args = [
     '--single-transaction',
     '--quick',
+    '--no-tablespaces',
     '--triggers',
     '--default-character-set=utf8mb4',
     '--host', config.dumpUrl.hostname,

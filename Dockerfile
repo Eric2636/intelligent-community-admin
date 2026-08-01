@@ -2,7 +2,8 @@
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 
-RUN apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update \
+RUN sed -i 's|deb.debian.org|mirrors.cloud.tencent.com|g' /etc/apt/sources.list.d/debian.sources \
+  && apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
@@ -25,7 +26,8 @@ RUN npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runner
 
-RUN apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update \
+RUN sed -i 's|deb.debian.org|mirrors.cloud.tencent.com|g' /etc/apt/sources.list.d/debian.sources \
+  && apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update \
   && apt-get install -y --no-install-recommends openssl ca-certificates default-mysql-client \
   && rm -rf /var/lib/apt/lists/*
 

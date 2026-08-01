@@ -34,6 +34,7 @@ test('runtime image contains a database dump client and the worker never invokes
   assert.match(dockerfile, /default-mysql-client/);
   assert.equal((dockerfile.match(/Acquire::ForceIPv4=true/g) || []).length, 2);
   assert.equal((dockerfile.match(/Acquire::Retries=3/g) || []).length, 2);
+  assert.equal((dockerfile.match(/mirrors\.cloud\.tencent\.com/g) || []).length, 2);
   assert.match(worker, /spawn\(/);
   assert.doesNotMatch(worker, /shell:\s*true|exec\(/);
   assert.match(worker, /rename\(/);

@@ -5,6 +5,7 @@ import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import {
   cacheAsideJson,
+  invalidateMallItemDetailCache,
   invalidateMallItemsListCache,
   mallItemDetailCacheKey,
   mallItemsListCacheKey,
@@ -14,6 +15,7 @@ import {
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { MallCategoryService } from './mall-category.service';
 import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
+import type { UpdateMallItemDto } from './mall.dto';
 import { jsonImages, parsePriceNum, serializeMallItem } from './mall.serialize';
 
 export class MallItemService {
@@ -161,5 +163,96 @@ export class MallItemService {
       orderBy: { createdAt: 'desc' },
     });
     return rows.map((r) => serializeMallItem(r));
+  }
+
+  private async getOwnedItem(userIdRaw: string, itemIdRaw: string) {
+    const userId = String(userIdRaw || '').trim();
+    const itemId = String(itemIdRaw || '').trim();
+    if (!itemId) throw new HttpError(400, '商品 id 不能为空');
+    const row = await prisma.mallItem.findFirst({
+      where: { id: itemId, ...contentNotDeleted },
+    });
+    if (!row) throw new HttpError(404, '商品不存在');
+    if (row.publisherId !== userId) throw new HttpError(403, '只能操作自己发布的信息');
+    return row;
+  }
+
+  async updateItem(params: { userId: string; itemId: string; dto: UpdateMallItemDto }) {
+    const current = await this.getOwnedItem(params.userId, params.itemId);
+    const dto = params.dto;
+    const data: Prisma.MallItemUpdateInput = {};
+
+    if (dto.categoryId !== undefined) {
+      data.categoryId = await this.categories.assertEnabledCategoryId(dto.categoryId);
+    }
+    if (dto.title !== undefined) {
+      const title = dto.title.trim();
+      if (!title) throw new HttpError(400, '标题不能为空');
+      data.title = title;
+    }
+    if (dto.price !== undefined) data.price = dto.price?.trim() || null;
+    if (dto.unit !== undefined) data.unit = (dto.unit.trim() || '元').slice(0, 16);
+    if (dto.desc !== undefined) data.desc = dto.desc.trim();
+    if (dto.contact !== undefined) data.contact = dto.contact?.trim() || null;
+    if (dto.locationName !== undefined) data.locationName = dto.locationName?.trim() || null;
+    if (dto.locationAddress !== undefined) data.locationAddress = dto.locationAddress?.trim() || null;
+    if (dto.latitude !== undefined) data.latitude = Number.isFinite(dto.latitude) ? dto.latitude : null;
+    if (dto.longitude !== undefined) data.longitude = Number.isFinite(dto.longitude) ? dto.longitude : null;
+
+    const serializedCurrent = serializeMallItem(current);
+    const mainImages = dto.mainImages === undefined
+      ? serializedCurrent.mainImages
+      : parseStrictMediaUrlList(dto.mainImages, 1, 'image', 'mainImages');
+    const subImages = dto.subImages === undefined
+      ? serializedCurrent.subImages
+      : parseStrictMediaUrlList(dto.subImages, 6, 'image', 'subImages');
+    if (mainImages.length + subImages.length > 6) {
+      throw new HttpError(400, '图片最多上传 6 张（主图+副图合计）');
+    }
+    if (dto.mainImages !== undefined) data.mainImages = jsonImages(mainImages);
+    if (dto.subImages !== undefined) data.subImages = jsonImages(subImages);
+    if (dto.videos !== undefined) {
+      data.videos = jsonImages(parseStrictMediaUrlList(dto.videos, 2, 'video', 'videos'));
+    }
+
+    if (Object.keys(data).length === 0) throw new HttpError(400, '没有可更新的内容');
+    const row = await prisma.mallItem.update({ where: { id: current.id }, data });
+    await Promise.all([
+      invalidateMallItemsListCache(),
+      invalidateMallItemDetailCache(current.id),
+    ]);
+    return serializeMallItem(row);
+  }
+
+  async setItemVisibility(params: {
+    userId: string;
+    itemId: string;
+    visibility: 'ONLINE' | 'OFFLINE';
+  }) {
+    const current = await this.getOwnedItem(params.userId, params.itemId);
+    const row = current.visibility === params.visibility
+      ? current
+      : await prisma.mallItem.update({
+          where: { id: current.id },
+          data: { visibility: params.visibility },
+        });
+    await Promise.all([
+      invalidateMallItemsListCache(),
+      invalidateMallItemDetailCache(current.id),
+    ]);
+    return serializeMallItem(row);
+  }
+
+  async deleteItem(params: { userId: string; itemId: string }) {
+    const current = await this.getOwnedItem(params.userId, params.itemId);
+    await prisma.mallItem.update({
+      where: { id: current.id },
+      data: { deletedAt: new Date() },
+    });
+    await Promise.all([
+      invalidateMallItemsListCache(),
+      invalidateMallItemDetailCache(current.id),
+    ]);
+    return { id: current.id, _id: current.id };
   }
 }

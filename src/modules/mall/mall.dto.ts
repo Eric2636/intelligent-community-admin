@@ -103,6 +103,82 @@ export class PublishMallItemDto {
   images?: string[];
 }
 
+export class UpdateMallItemDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  categoryId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  title?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  price?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  unit?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(8000)
+  desc?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  contact?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  locationName?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  locationAddress?: string | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  latitude?: number | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  longitude?: number | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(1)
+  @IsString({ each: true })
+  mainImages?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  subImages?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  videos?: string[];
+}
+
+export class PatchMallItemVisibilityDto {
+  @IsString()
+  @IsIn(['ONLINE', 'OFFLINE'])
+  visibility!: 'ONLINE' | 'OFFLINE';
+}
+
 export class CreateMallOrderDto {
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()

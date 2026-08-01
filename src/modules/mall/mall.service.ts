@@ -34,6 +34,18 @@ export class MallService {
     return this.items.getMyItems(params);
   }
 
+  updateItem(params: Parameters<MallItemService['updateItem']>[0]) {
+    return this.items.updateItem(params);
+  }
+
+  setItemVisibility(params: Parameters<MallItemService['setItemVisibility']>[0]) {
+    return this.items.setItemVisibility(params);
+  }
+
+  deleteItem(params: Parameters<MallItemService['deleteItem']>[0]) {
+    return this.items.deleteItem(params);
+  }
+
   favoriteItem(params: Parameters<MallFavoriteService['favoriteItem']>[0]) {
     return this.favorites.favoriteItem(params);
   }

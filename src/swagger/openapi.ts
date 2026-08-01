@@ -158,6 +158,33 @@ export const openApiDocument: Record<string, unknown> = {
           images: { type: 'array', items: { type: 'string' }, description: '兼容旧字段' },
         },
       },
+      UpdateMallItemBody: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          categoryId: { type: 'string', minLength: 1, maxLength: 200 },
+          title: { type: 'string', minLength: 1, maxLength: 200 },
+          price: { type: ['string', 'null'], maxLength: 64 },
+          unit: { type: 'string', maxLength: 16 },
+          desc: { type: 'string', maxLength: 8000 },
+          contact: { type: ['string', 'null'], maxLength: 500 },
+          locationName: { type: ['string', 'null'], maxLength: 200 },
+          locationAddress: { type: ['string', 'null'], maxLength: 500 },
+          latitude: { type: ['number', 'null'] },
+          longitude: { type: ['number', 'null'] },
+          mainImages: { type: 'array', maxItems: 1, items: { type: 'string' } },
+          subImages: { type: 'array', maxItems: 6, items: { type: 'string' } },
+          videos: { type: 'array', maxItems: 2, items: { type: 'string' } },
+        },
+      },
+      PatchMallItemVisibilityBody: {
+        type: 'object',
+        required: ['visibility'],
+        additionalProperties: false,
+        properties: {
+          visibility: { type: 'string', enum: ['ONLINE', 'OFFLINE'] },
+        },
+      },
       CreateMallOrderBody: {
         type: 'object',
         required: ['itemId', 'clientRequestId'],
@@ -1242,6 +1269,53 @@ export const openApiDocument: Record<string, unknown> = {
             description: 'OK',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/JsonSuccess' } } },
           },
+        },
+      },
+      patch: {
+        tags: ['Mall'],
+        summary: '编辑自己发布的市场信息',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/UpdateMallItemBody' } },
+          },
+        },
+        responses: {
+          '200': { description: 'OK' },
+          '403': { description: '只能编辑自己发布的信息' },
+          '404': { description: '信息不存在或已删除' },
+        },
+      },
+      delete: {
+        tags: ['Mall'],
+        summary: '删除自己发布的市场信息（软删除）',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'OK' },
+          '403': { description: '只能删除自己发布的信息' },
+          '404': { description: '信息不存在或已删除' },
+        },
+      },
+    },
+    '/api/items/{itemId}/visibility': {
+      patch: {
+        tags: ['Mall'],
+        summary: '公开或隐藏自己发布的市场信息',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'itemId', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/PatchMallItemVisibilityBody' } },
+          },
+        },
+        responses: {
+          '200': { description: 'OK' },
+          '403': { description: '只能操作自己发布的信息' },
+          '404': { description: '信息不存在或已删除' },
         },
       },
     },

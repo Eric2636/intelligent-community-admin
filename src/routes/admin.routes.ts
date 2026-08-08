@@ -303,6 +303,7 @@ export function registerAdminRoutes(
         ...pageOf(q),
         keyword: q.keyword,
         visibility: q.visibility,
+        authorKeyword: type === 'posts' ? q.authorKeyword : undefined,
       }),
     };
   });

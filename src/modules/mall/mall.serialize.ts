@@ -30,7 +30,6 @@ export function serializeMallItem(
     publisherId: string;
     publisherName?: string | null;
     publisherAvatar?: string | null;
-    adminLabel?: string | null;
     visibility?: string;
     pinned?: boolean;
     createdAt: Date;
@@ -79,7 +78,6 @@ export function serializeMallItem(
     publisherId: row.publisherId,
     publisherName: row.publisherName ?? '',
     publisherAvatar: avatarOrDefault(row.publisherAvatar),
-    adminLabel: row.adminLabel ?? '',
     visibility: row.visibility ?? 'ONLINE',
     pinned: Boolean(row.pinned),
     createdAt: row.createdAt.toISOString(),

@@ -135,6 +135,11 @@ export class AdminContentQueryDto extends AdminListQueryDto {
   @IsOptional()
   @IsIn(['ONLINE', 'OFFLINE'])
   visibility?: 'ONLINE' | 'OFFLINE';
+
+  /** 仅小区留言：按实际发布用户昵称或 User.id 查询 */
+  @IsOptional()
+  @IsString()
+  authorKeyword?: string;
 }
 
 export class UpdateContentStateDto {

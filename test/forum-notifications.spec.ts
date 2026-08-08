@@ -20,7 +20,6 @@ type ForumReplyRow = {
   authorId: string;
   authorName: string | null;
   authorAvatar: string | null;
-  authorIdentity: string | null;
   content: string;
   images: unknown;
   videos: unknown;
@@ -140,6 +139,13 @@ function createFakeDatabase(options: {
   }
 
   const database = {
+    user: {
+      findMany: async ({ where }: { where: { id: { in: string[] } } }) =>
+        where.id.in.map((id) => ({ id, identityType: null })),
+    },
+    adminUser: {
+      findMany: async () => [],
+    },
     $transaction: async <T>(callback: (tx: ReturnType<typeof transactionClient>) => Promise<T>) => {
       transactionCount++;
       const draft = cloneState(committed);
@@ -176,7 +182,6 @@ function reply(overrides: Partial<ForumReplyRow> = {}): ForumReplyRow {
     authorId: 'user-b',
     authorName: '用户B',
     authorAvatar: null,
-    authorIdentity: null,
     content: 'B 的回复',
     images: [],
     videos: [],

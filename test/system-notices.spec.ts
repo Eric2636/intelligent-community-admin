@@ -11,6 +11,7 @@ import {
 } from '../src/modules/notification/system-notice.service';
 import { registerAdminSystemNoticeRoute } from '../src/routes/admin-system-notice.routes';
 import { errorHandler } from '../src/middleware/error-handler';
+import { createAdminAuth } from '../src/middleware/admin-auth';
 import { openApiDocument } from '../src/swagger/openapi';
 
 type UserRow = { id: string; enabled: boolean };
@@ -302,10 +303,16 @@ async function requestSystemNotice(role: 'ADMIN' | 'SUPERADMIN', body: unknown) 
   process.env.ADMIN_JWT_SECRET = 'system-notice-test-secret';
   const router = new Router();
   let calls = 0;
-  registerAdminSystemNoticeRoute(router, async (_input) => {
-    calls += 1;
-    return { noticeId: 'notice-1', recipientCount: 3 };
-  });
+  registerAdminSystemNoticeRoute(
+    router,
+    async (_input) => {
+      calls += 1;
+      return { noticeId: 'notice-1', recipientCount: 3 };
+    },
+    createAdminAuth({
+      findAdminSession: async () => ({ enabled: true, sessionVersion: 1 }),
+    }),
+  );
   const layer = router.stack.find(
     (candidate) =>
       candidate.path === '/api/admin/system-notices' &&
@@ -313,7 +320,7 @@ async function requestSystemNotice(role: 'ADMIN' | 'SUPERADMIN', body: unknown) 
   );
   assert.ok(layer);
   const token = jwt.sign(
-    { sub: 'admin-1', username: 'operator', role, typ: 'access' },
+    { sub: 'admin-1', username: 'operator', role, typ: 'access', sessionVersion: 1 },
     process.env.ADMIN_JWT_SECRET,
   );
   const ctx: any = {

@@ -12,11 +12,10 @@ import {
   invalidateForumPostListCache,
   invalidateForumPostRepliesCache,
 } from '../../lib/redis-cache';
-import { adminContentAttributionForMiniPost, adminDisplayLabelForContent } from '../admin/admin.service';
 import { notify } from '../notification/notification-notify';
 import { sanitizeNotificationText } from '../notification/notification-text';
 import { avatarOrDefault } from '../user/default-avatar';
-import { contentIdentityTag, identityTypeLabel } from '../user/user-identity';
+import { effectiveUserTag, resolveEffectiveUserTags, type EffectiveUserTag } from '../user/user-identity';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
 
@@ -24,12 +23,13 @@ const MAX_POST_IMAGES = 9;
 const MAX_POST_VIDEOS = 2;
 const MAX_REPLY_IMAGES = 6;
 const MAX_REPLY_VIDEOS = 2;
+const ADMIN_ANNOUNCEMENT_AUTHOR_ID = '__admin_announcement__';
 
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
 }
 
-type ForumDatabase = Pick<PrismaClient, '$transaction'>;
+type ForumDatabase = Pick<PrismaClient, '$transaction' | 'user' | 'adminUser'>;
 
 type ForumCacheInvalidators = {
   invalidatePostList: () => Promise<void>;
@@ -137,8 +137,9 @@ export class ForumService {
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
 
+    const tags = await resolveEffectiveUserTags(this.database, [...pinnedRows, ...listRows].map((row) => row.authorId));
     const mapOne = (p: (typeof pinnedRows)[number]) =>
-      this.mapPostListItem(p, userId || '', likedSet.has(p.id), favSet.has(p.id));
+      this.mapPostListItem(p, userId || '', likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId));
 
     return {
       pinned: pinnedRows.map(mapOne),
@@ -177,7 +178,8 @@ export class ForumService {
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
 
-    return rows.map((p) => this.mapPostListItem(p, params.userId || '', likedSet.has(p.id), favSet.has(p.id)));
+    const tags = await resolveEffectiveUserTags(this.database, rows.map((row) => row.authorId));
+    return rows.map((p) => this.mapPostListItem(p, params.userId || '', likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId)));
   }
 
   async getPostDetail(params: { userId?: string; postId: string }) {
@@ -221,7 +223,8 @@ export class ForumService {
     ]);
 
     const replyRows = this.reviveForumReplyRows(replyRowsRaw);
-    const detail = this.mapPostDetail(row, userId, Boolean(liked), Boolean(favorited));
+    const tags = await resolveEffectiveUserTags(this.database, [row.authorId]);
+    const detail = this.mapPostDetail(row, userId, Boolean(liked), Boolean(favorited), tags.get(row.authorId));
     return {
       ...detail,
       replies: await this.buildFlatRepliesWithMeta(userId, replyRows),
@@ -283,11 +286,7 @@ export class ForumService {
       await lockUsersForProfileSnapshot(tx, [params.userId]);
       const author = await tx.user.findUnique({
         where: { id: params.userId },
-        select: { name: true, avatar: true, identityType: true },
-      });
-      const boundAdmin = await tx.adminUser.findFirst({
-        where: { boundUserId: params.userId, enabled: true },
-        select: { id: true, role: true, orgName: true },
+        select: { name: true, avatar: true },
       });
       return tx.forumPost.create({
         data: {
@@ -298,13 +297,12 @@ export class ForumService {
           authorId: params.userId,
           authorName: author?.name ?? '邻居',
           authorAvatar: author?.avatar ?? null,
-          authorIdentity: author?.identityType ?? null,
-          ...adminContentAttributionForMiniPost(boundAdmin),
         },
       });
     });
     await invalidateForumPostListCache();
-    return this.mapPostDetail(row, params.userId, false, false);
+    const tags = await resolveEffectiveUserTags(this.database, [params.userId]);
+    return this.mapPostDetail(row, params.userId, false, false, tags.get(params.userId));
   }
 
   async publishReply(params: {
@@ -364,14 +362,8 @@ export class ForumService {
       }
       const author = await tx.user.findUnique({
         where: { id: params.userId },
-        select: { name: true, avatar: true, identityType: true },
+        select: { name: true, avatar: true },
       });
-      const boundAdmin = await tx.adminUser.findFirst({
-        where: { boundUserId: params.userId, enabled: true },
-        select: { role: true, orgName: true },
-      });
-      const adminLabel = boundAdmin ? adminDisplayLabelForContent(boundAdmin) : '';
-      const tag = contentIdentityTag(author?.identityType, adminLabel);
       const r = await tx.forumReply.create({
         data: {
           postId: id,
@@ -381,7 +373,6 @@ export class ForumService {
           authorId: params.userId,
           authorName: author?.name ?? '邻居',
           authorAvatar: author?.avatar ?? null,
-          authorIdentity: author?.identityType ?? null,
           content,
           images: jsonMedia(images),
           videos: jsonMedia(videos),
@@ -392,17 +383,20 @@ export class ForumService {
         data: { replyCount: { increment: 1 } },
       });
       const notificationRecipientId = parent?.authorId ?? post.authorId;
-      await notify(tx, {
-        recipientId: notificationRecipientId,
-        actorId: params.userId,
-        type: parent ? 'FORUM_REPLY_REPLY' : 'FORUM_POST_REPLY',
-        bizType: 'forum',
-        bizId: id,
-        title: parent ? '有人回复了你的评论' : '有人回复了你的帖子',
-        content: notificationExcerpt(content) || '对方发送了图片或视频回复',
-        dedupeKey: `forum:reply:${r.id}:recipient:${notificationRecipientId}`,
-      });
-      return { row: r, adminLabel, tag, displayDepth };
+      // 后台公告没有对应小程序用户，不能向保留发布者标识创建通知。
+      if (notificationRecipientId !== ADMIN_ANNOUNCEMENT_AUTHOR_ID) {
+        await notify(tx, {
+          recipientId: notificationRecipientId,
+          actorId: params.userId,
+          type: parent ? 'FORUM_REPLY_REPLY' : 'FORUM_POST_REPLY',
+          bizType: 'forum',
+          bizId: id,
+          title: parent ? '有人回复了你的评论' : '有人回复了你的帖子',
+          content: notificationExcerpt(content) || '对方发送了图片或视频回复',
+          dedupeKey: `forum:reply:${r.id}:recipient:${notificationRecipientId}`,
+        });
+      }
+      return { row: r, displayDepth };
     });
 
     await Promise.all([
@@ -410,7 +404,8 @@ export class ForumService {
       this.cacheInvalidators.invalidateReplies(id),
     ]);
 
-    const { row, adminLabel, tag, displayDepth } = created;
+    const { row, displayDepth } = created;
+    const tag = (await resolveEffectiveUserTags(this.database, [row.authorId])).get(row.authorId) ?? effectiveUserTag(null);
     return {
       _id: row.id,
       id: row.id,
@@ -420,11 +415,8 @@ export class ForumService {
       replyToUserId: row.replyToUserId ?? '',
       authorId: row.authorId,
       authorName: row.authorName ?? '',
-      authorIdentity: row.authorIdentity ?? '',
-      authorIdentityLabel: identityTypeLabel(row.authorIdentity),
-      adminLabel,
-      contentTagLabel: tag.label,
-      contentTagType: tag.type,
+      userTagLabel: tag.label,
+      userTagType: tag.type,
       authorAvatar: avatarOrDefault(row.authorAvatar),
       isAuthor: true,
       content: row.content,
@@ -733,7 +725,8 @@ export class ForumService {
     ]);
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
-    return rows.map((p) => this.mapPostListItem(p, params.userId, likedSet.has(p.id), favSet.has(p.id)));
+    const tags = await resolveEffectiveUserTags(this.database, rows.map((row) => row.authorId));
+    return rows.map((p) => this.mapPostListItem(p, params.userId, likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId)));
   }
 
   private async getReplyReactionSnapshot(replyId: string, userId: string) {
@@ -764,7 +757,6 @@ export class ForumService {
       authorId: string;
       authorName: string | null;
       authorAvatar?: string | null;
-      authorIdentity?: string | null;
       content: string;
       images: unknown;
       videos: unknown;
@@ -800,17 +792,11 @@ export class ForumService {
         where: { replyId: { in: ids } },
         _count: { _all: true },
       }),
-      prisma.adminUser.findMany({
-        where: { boundUserId: { in: authorIds }, enabled: true },
-        select: { boundUserId: true, role: true, orgName: true },
-      }),
+      resolveEffectiveUserTags(this.database, authorIds),
     ]);
     const likedSet = new Set(likes.map((x) => x.replyId));
     const favSet = new Set(favs.map((x) => x.replyId));
     const myReactMap = new Map(userReactions.map((x) => [x.replyId, x.emoji] as const));
-    const adminLabelMap = new Map(
-      admins.filter((x) => x.boundUserId).map((x) => [x.boundUserId!, adminDisplayLabelForContent(x)] as const),
-    );
     const countMap = new Map<string, Record<string, number>>();
     for (const g of reactionAgg) {
       if (!countMap.has(g.replyId)) countMap.set(g.replyId, {});
@@ -818,8 +804,7 @@ export class ForumService {
     }
 
     const mapBase = (r: (typeof rows)[number]) => {
-      const adminLabel = adminLabelMap.get(r.authorId) ?? '';
-      const tag = contentIdentityTag(r.authorIdentity, adminLabel);
+      const tag = admins.get(r.authorId) ?? effectiveUserTag(null);
       return {
         _id: r.id,
         id: r.id,
@@ -829,11 +814,8 @@ export class ForumService {
         replyToUserId: r.replyToUserId ?? '',
         authorId: r.authorId,
         authorName: r.authorName ?? '',
-        authorIdentity: r.authorIdentity ?? '',
-        authorIdentityLabel: identityTypeLabel(r.authorIdentity),
-        adminLabel,
-        contentTagLabel: tag.label,
-        contentTagType: tag.type,
+        userTagLabel: tag.label,
+        userTagType: tag.type,
         authorAvatar: avatarOrDefault(r.authorAvatar),
         isAuthor: r.authorId === userId,
         content: r.content,
@@ -906,10 +888,11 @@ export class ForumService {
     });
     const likedSet = new Set(liked.map((x) => x.postId));
 
+    const tags = await resolveEffectiveUserTags(this.database, posts.map((post) => post.authorId));
     return ids
       .map((id) => map.get(id))
       .filter(Boolean)
-      .map((p) => this.mapPostListItem(p!, params.userId, likedSet.has(p!.id), true));
+      .map((p) => this.mapPostListItem(p!, params.userId, likedSet.has(p!.id), true, tags.get(p!.authorId)));
   }
 
   private mapPostListItem(
@@ -921,9 +904,7 @@ export class ForumService {
       videos: unknown;
       authorId: string;
       authorName: string | null;
-      authorIdentity?: string | null;
       authorAvatar?: string | null;
-      adminLabel?: string | null;
       postType?: string | null;
       validUntil?: Date | null;
       pinned?: boolean;
@@ -936,10 +917,11 @@ export class ForumService {
     userId: string,
     isLiked: boolean,
     isFavorited: boolean,
+    tag: EffectiveUserTag = effectiveUserTag(null),
   ) {
     const images = Array.isArray(p.images) ? p.images : (p.images ?? []);
     const videos = Array.isArray(p.videos) ? p.videos : (p.videos ?? []);
-    const tag = contentIdentityTag(p.authorIdentity, p.adminLabel);
+    const isAdminAnnouncement = p.postType === 'ANNOUNCEMENT' && p.authorId === '__admin_announcement__';
     return {
       _id: p.id,
       id: p.id,
@@ -950,12 +932,9 @@ export class ForumService {
       pinned: Boolean(p.pinned),
       authorId: p.authorId,
       authorName: p.authorName ?? '',
-      authorIdentity: p.authorIdentity ?? '',
-      authorIdentityLabel: identityTypeLabel(p.authorIdentity),
       authorAvatar: avatarOrDefault(p.authorAvatar),
-      adminLabel: p.adminLabel ?? '',
-      contentTagLabel: tag.label,
-      contentTagType: tag.type,
+      userTagLabel: isAdminAnnouncement ? '' : tag.label,
+      userTagType: isAdminAnnouncement ? '' : tag.type,
       postType: p.postType ?? 'NORMAL',
       validUntil: p.validUntil ? p.validUntil.toISOString() : '',
       viewCount: p.viewCount ?? 0,
@@ -980,9 +959,7 @@ export class ForumService {
       videos: unknown;
       authorId: string;
       authorName: string | null;
-      authorIdentity?: string | null;
       authorAvatar?: string | null;
-      adminLabel?: string | null;
       postType?: string | null;
       validUntil?: Date | null;
       pinned?: boolean;
@@ -995,8 +972,9 @@ export class ForumService {
     userId: string,
     isLiked: boolean,
     isFavorited: boolean,
+    tag?: EffectiveUserTag,
   ) {
-    const base = this.mapPostListItem(p, userId, isLiked, isFavorited);
+    const base = this.mapPostListItem(p, userId, isLiked, isFavorited, tag);
     return {
       ...base,
       authorAvatar: avatarOrDefault(p.authorAvatar),

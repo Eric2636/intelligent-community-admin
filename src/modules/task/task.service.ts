@@ -9,16 +9,15 @@ import {
   taskPendingListCacheKey,
   TASK_PENDING_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
-import { adminContentAttributionForMiniPublisher } from '../admin/admin.service';
 import { notify } from '../notification/notification-notify';
 import { avatarOrDefault } from '../user/default-avatar';
-import { contentIdentityTag, identityTypeLabel } from '../user/user-identity';
+import { effectiveUserTag, resolveEffectiveUserTags, type EffectiveUserTag } from '../user/user-identity';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 
 const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
 
-type TaskDatabase = Pick<PrismaClient, '$transaction' | 'adminUser'>;
+type TaskDatabase = Pick<PrismaClient, '$transaction'>;
 
 function taskNotificationContent(taskTitle: string, action: string) {
   const title = Array.from(String(taskTitle || '').trim()).slice(0, 80).join('');
@@ -32,12 +31,14 @@ export class TaskService {
       invalidatePendingTasksListCache,
   ) {}
 
-  private async getMiniPublisherAdminAttribution(userId: string) {
-    const admin = await this.database.adminUser.findFirst({
-      where: { boundUserId: userId, enabled: true },
-      select: { id: true, role: true, orgName: true },
-    });
-    return adminContentAttributionForMiniPublisher(admin);
+  private reviveTaskRows<T extends { createdAt: Date; claimedAt: Date | null; completedAt: Date | null; confirmedAt: Date | null }>(rows: T[]): T[] {
+    return rows.map((row) => ({
+      ...row,
+      createdAt: row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt as unknown as string),
+      claimedAt: row.claimedAt && !(row.claimedAt instanceof Date) ? new Date(row.claimedAt as unknown as string) : row.claimedAt,
+      completedAt: row.completedAt && !(row.completedAt instanceof Date) ? new Date(row.completedAt as unknown as string) : row.completedAt,
+      confirmedAt: row.confirmedAt && !(row.confirmedAt instanceof Date) ? new Date(row.confirmedAt as unknown as string) : row.confirmedAt,
+    }));
   }
 
   async getTaskDetail(taskId: string) {
@@ -47,7 +48,7 @@ export class TaskService {
       where: { id, visibility: 'ONLINE', ...contentNotDeleted },
     });
     if (!row) throw new HttpError(404, '任务不存在');
-    return this.mapTask(row);
+    return this.mapTaskWithCurrentTag(row);
   }
 
   async createTask(params: {
@@ -71,14 +72,13 @@ export class TaskService {
       throw new HttpError(400, '感谢金金额无效');
     }
 
-    const adminAttribution = await this.getMiniPublisherAdminAttribution(params.publisherId);
     const images = parseStrictMediaUrlList(params.images, MAX_TASK_IMAGES, 'image', 'images');
     const videos = parseStrictMediaUrlList(params.videos, MAX_TASK_VIDEOS, 'video', 'videos');
     const row = await prisma.$transaction(async (tx) => {
       await lockUsersForProfileSnapshot(tx, [params.publisherId]);
       const publisher = await tx.user.findUnique({
         where: { id: params.publisherId },
-        select: { name: true, avatar: true, identityType: true },
+        select: { name: true, avatar: true },
       });
       return tx.task.create({
         data: {
@@ -92,14 +92,12 @@ export class TaskService {
           publisherId: params.publisherId,
           publisherName: publisher?.name ?? '',
           publisherAvatar: publisher?.avatar ?? null,
-          publisherIdentity: publisher?.identityType ?? null,
-          ...adminAttribution,
         },
       });
     });
 
     await invalidatePendingTasksListCache();
-    return this.mapTask(row);
+    return this.mapTaskWithCurrentTag(row);
   }
 
   async saveDraft(params: {
@@ -117,7 +115,6 @@ export class TaskService {
     const reward = params.reward != null ? String(params.reward).trim() : '';
     const location = params.location != null ? String(params.location).trim() : '';
 
-    const adminAttribution = await this.getMiniPublisherAdminAttribution(params.userId);
     const images = parseStrictMediaUrlList(params.images, MAX_TASK_IMAGES, 'image', 'images');
     const videos = parseStrictMediaUrlList(params.videos, MAX_TASK_VIDEOS, 'video', 'videos');
     const id = params.taskId ? String(params.taskId).trim() : '';
@@ -125,7 +122,7 @@ export class TaskService {
       await lockUsersForProfileSnapshot(tx, [params.userId]);
       const publisher = await tx.user.findUnique({
         where: { id: params.userId },
-        select: { name: true, avatar: true, identityType: true },
+        select: { name: true, avatar: true },
       });
       const data = {
         title: title || '未命名草稿',
@@ -137,8 +134,6 @@ export class TaskService {
         publisherId: params.userId,
         publisherName: publisher?.name ?? '',
         publisherAvatar: publisher?.avatar ?? null,
-        publisherIdentity: publisher?.identityType ?? null,
-        ...adminAttribution,
       };
       if (id) {
         const row = await tx.task.findFirst({
@@ -163,16 +158,15 @@ export class TaskService {
         if (transition.count !== 1) throw new HttpError(409, '任务状态已变化，请刷新后重试');
         const updated = await tx.task.findUnique({ where: { id } });
         if (!updated) throw new HttpError(404, '草稿不存在');
-        return this.mapTask(updated);
+        return updated;
       }
-      return this.mapTask(await tx.task.create({ data: { ...data, status: 'DRAFT' } }));
-    });
+      return tx.task.create({ data: { ...data, status: 'DRAFT' } });
+    }).then((row) => this.mapTaskWithCurrentTag(row));
   }
 
   async publishDraft(params: { taskId: string; userId: string }) {
     const id = String(params.taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
-    const adminAttribution = await this.getMiniPublisherAdminAttribution(params.userId);
     return this.database
       .$transaction(async (tx) => {
         await lockUsersForProfileSnapshot(tx, [params.userId]);
@@ -197,7 +191,7 @@ export class TaskService {
         if (!location) throw new HttpError(400, '请填写地点');
         const publisher = await tx.user.findUnique({
           where: { id: params.userId },
-          select: { name: true, avatar: true, identityType: true },
+          select: { name: true, avatar: true },
         });
         const transition = await tx.task.updateMany({
           where: {
@@ -212,25 +206,23 @@ export class TaskService {
             version: { increment: 1 },
             publisherName: publisher?.name ?? '',
             publisherAvatar: publisher?.avatar ?? null,
-            publisherIdentity: publisher?.identityType ?? null,
-            ...(row.adminLabel ? {} : adminAttribution),
           },
         });
         if (transition.count !== 1) throw new HttpError(409, '任务状态已变化，请刷新后重试');
         const updated = await tx.task.findUnique({ where: { id } });
         if (!updated) throw new HttpError(404, '任务不存在');
-        return this.mapTask(updated);
+        return updated;
       })
-      .then(async (mapped) => {
+      .then(async (row) => {
         await this.invalidatePendingList();
-        return mapped;
+        return this.mapTaskWithCurrentTag(row);
       });
   }
 
   async listPendingTasks(params: { keyword?: string; page: number; pageSize: number }) {
     const kw = (params.keyword || '').trim();
     const key = await taskPendingListCacheKey(params.page, params.pageSize, kw);
-    return cacheAsideJson(key, TASK_PENDING_LIST_TTL_SEC, async () => {
+    const cached = await cacheAsideJson(key, TASK_PENDING_LIST_TTL_SEC, async () => {
       const { keyword, page, pageSize } = params;
       const skip = (page - 1) * pageSize;
 
@@ -251,8 +243,9 @@ export class TaskService {
         take: pageSize,
       });
 
-      return rows.map((t) => this.mapTask(t));
+      return rows;
     });
+    return this.mapTaskList(this.reviveTaskRows(cached));
   }
 
   async getMyTasks(params: { userId: string; type?: string }) {
@@ -280,7 +273,7 @@ export class TaskService {
       orderBy: { createdAt: 'desc' },
     });
 
-    return rows.map((t) => this.mapTask(t));
+    return this.mapTaskList(rows);
   }
 
   async claimTask(params: { taskId: string; userId: string; takerName?: string }) {
@@ -331,11 +324,11 @@ export class TaskService {
           content: taskNotificationContent(row.title, '已被领取'),
           dedupeKey: `task:${id}:TASK_CLAIMED:${updated.version}:recipient:${row.publisherId}`,
         });
-        return this.mapTask(updated);
+        return updated;
       })
-      .then(async (mapped) => {
+      .then(async (row) => {
         await this.invalidatePendingList();
-        return mapped;
+        return this.mapTaskWithCurrentTag(row);
       });
   }
 
@@ -383,8 +376,8 @@ export class TaskService {
         content: taskNotificationContent(row.title, '已由接单人提交完成，请及时确认'),
         dedupeKey: `task:${id}:TASK_SUBMITTED:${updated.version}:recipient:${row.publisherId}`,
       });
-      return this.mapTask(updated);
-    });
+      return updated;
+    }).then((row) => this.mapTaskWithCurrentTag(row));
   }
 
   async confirmComplete(params: { taskId: string; userId: string }) {
@@ -427,8 +420,8 @@ export class TaskService {
         content: taskNotificationContent(row.title, '已由发布者确认完成'),
         dedupeKey: `task:${id}:TASK_CONFIRMED:${updated.version}:recipient:${row.takerId}`,
       });
-      return this.mapTask(updated);
-    });
+      return updated;
+    }).then((row) => this.mapTaskWithCurrentTag(row));
   }
 
   async rejectComplete(params: { taskId: string; userId: string }) {
@@ -471,8 +464,8 @@ export class TaskService {
         content: taskNotificationContent(row.title, '的完成提交被驳回，请修改后重新提交'),
         dedupeKey: `task:${id}:TASK_REJECTED:${updated.version}:recipient:${row.takerId}`,
       });
-      return this.mapTask(updated);
-    });
+      return updated;
+    }).then((row) => this.mapTaskWithCurrentTag(row));
   }
 
   async revokePublish(params: { taskId: string; userId: string }) {
@@ -513,11 +506,11 @@ export class TaskService {
             dedupeKey: `task:${id}:TASK_CANCELLED:${updated.version}:recipient:${row.takerId}`,
           });
         }
-        return this.mapTask(updated);
+        return updated;
       })
-      .then(async (mapped) => {
+      .then(async (row) => {
         await this.invalidatePendingList();
-        return mapped;
+        return this.mapTaskWithCurrentTag(row);
       });
   }
 
@@ -547,11 +540,11 @@ export class TaskService {
         if (transition.count !== 1) throw new HttpError(409, '任务状态已变化，请刷新后重试');
         const updated = await tx.task.findUnique({ where: { id } });
         if (!updated) throw new HttpError(404, '任务不存在');
-        return this.mapTask(updated);
+        return updated;
       })
-      .then(async (mapped) => {
+      .then(async (row) => {
         await this.invalidatePendingList();
-        return mapped;
+        return this.mapTaskWithCurrentTag(row);
       });
   }
 
@@ -638,12 +631,22 @@ export class TaskService {
           content: taskNotificationContent(row.title, '已被接单人放弃并重新开放领取'),
           dedupeKey: `task:${id}:TASK_ABANDONED:${updated.version}:recipient:${row.publisherId}`,
         });
-        return this.mapTask(updated);
+        return updated;
       })
-      .then(async (mapped) => {
+      .then(async (row) => {
         await this.invalidatePendingList();
-        return mapped;
+        return this.mapTaskWithCurrentTag(row);
       });
+  }
+
+  private async mapTaskWithCurrentTag(t: Parameters<TaskService['mapTask']>[0]) {
+    const tags = await resolveEffectiveUserTags(prisma, [t.publisherId]);
+    return this.mapTask(t, tags.get(t.publisherId));
+  }
+
+  private async mapTaskList(rows: Parameters<TaskService['mapTask']>[0][]) {
+    const tags = await resolveEffectiveUserTags(prisma, rows.map((row) => row.publisherId));
+    return rows.map((row) => this.mapTask(row, tags.get(row.publisherId)));
   }
 
   private mapTask(t: {
@@ -661,8 +664,6 @@ export class TaskService {
     publisherId: string;
     publisherName: string | null;
     publisherAvatar?: string | null;
-    publisherIdentity?: string | null;
-    adminLabel?: string | null;
     takerId: string | null;
     takerName: string | null;
     takerAvatar?: string | null;
@@ -672,8 +673,7 @@ export class TaskService {
     claimedAt: Date | null;
     completedAt: Date | null;
     confirmedAt: Date | null;
-  }) {
-    const tag = contentIdentityTag(t.publisherIdentity, t.adminLabel);
+  }, tag: EffectiveUserTag = effectiveUserTag(null)) {
     return {
       _id: t.id,
       title: t.title,
@@ -689,11 +689,8 @@ export class TaskService {
       publisherId: t.publisherId,
       publisherName: t.publisherName ?? '',
       publisherAvatar: avatarOrDefault(t.publisherAvatar),
-      publisherIdentity: t.publisherIdentity ?? '',
-      publisherIdentityLabel: identityTypeLabel(t.publisherIdentity),
-      adminLabel: t.adminLabel ?? '',
-      contentTagLabel: tag.label,
-      contentTagType: tag.type,
+      userTagLabel: tag.label,
+      userTagType: tag.type,
       takerId: t.takerId ?? '',
       takerName: t.takerName ?? '',
       takerAvatar: avatarOrDefault(t.takerAvatar),

@@ -17,8 +17,9 @@ export type PublishSystemNotice = (
 export function registerAdminSystemNoticeRoute(
   router: Router,
   publish: PublishSystemNotice = (input) => publishSystemNotice(prisma, input),
+  auth: typeof adminAuth = adminAuth,
 ) {
-  router.post('/api/admin/system-notices', adminAuth, async (ctx) => {
+  router.post('/api/admin/system-notices', auth, async (ctx) => {
     if (!requireSuperAdmin(ctx)) return;
     const dto = await parseDto(CreateSystemNoticeDto, jsonBody(ctx));
     ctx.body = {

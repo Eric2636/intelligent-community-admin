@@ -46,11 +46,13 @@ test('发布脚本从本地同步，测试与生产容器严格隔离', () => {
   assert.match(testEntry, /API_PORT_ARGS='-p 3002:3000'/);
   assert.match(testEntry, /WEB_API_UPSTREAM=api-test:3000/);
   assert.match(testEntry, /WEB_BUILD_ARGS='--build-arg VITE_APP_BASE=\/test-admin\/'/);
+  assert.match(testEntry, /^WEB_BUILD_NO_CACHE=--no-cache$/m);
   assert.match(productionEntry, /API_CONTAINER=ic-admin-api/);
   assert.match(productionEntry, /WEB_CONTAINER=ic-admin-web/);
   assert.match(productionEntry, /^API_PORT_ARGS=$/m);
   assert.match(productionEntry, /^WEB_BUILD_ARGS=$/m);
-  assert.match(release, /docker build \$WEB_BUILD_ARGS -t '\$image' \./);
+  assert.match(productionEntry, /^WEB_BUILD_NO_CACHE=$/m);
+  assert.match(release, /docker build \$WEB_BUILD_NO_CACHE \$WEB_BUILD_ARGS -t '\$image' \./);
   assert.match(release, /ADMIN_API_UPSTREAM=/);
   assert.match(release, /docker stop '\$\{API_CONTAINER\}-previous'/);
   assert.match(release, /docker stop '\$\{WEB_CONTAINER\}-previous'/);

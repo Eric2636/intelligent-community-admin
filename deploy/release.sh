@@ -59,7 +59,7 @@ deploy_api() {
   remote "set -euo pipefail
     cd '$remote_dir'
     docker build --target migration -t '$migration_image' .
-    docker build $WEB_BUILD_ARGS -t '$image' .
+    docker build $WEB_BUILD_NO_CACHE $WEB_BUILD_ARGS -t '$image' .
     docker run --rm --network ic-network --env-file '$API_ENV_FILE' --add-host host.docker.internal:host-gateway '$migration_image' npx prisma migrate deploy
     docker rm -f '${API_CONTAINER}-previous' >/dev/null 2>&1 || true
     if docker inspect '$API_CONTAINER' >/dev/null 2>&1; then docker rename '$API_CONTAINER' '${API_CONTAINER}-previous'; docker stop '${API_CONTAINER}-previous' >/dev/null; fi

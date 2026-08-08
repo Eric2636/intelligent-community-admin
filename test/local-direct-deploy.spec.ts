@@ -52,7 +52,10 @@ test('发布脚本从本地同步，测试与生产容器严格隔离', () => {
   assert.match(productionEntry, /^API_PORT_ARGS=$/m);
   assert.match(productionEntry, /^WEB_BUILD_ARGS=$/m);
   assert.match(productionEntry, /^WEB_BUILD_NO_CACHE=$/m);
-  assert.match(release, /docker build \$WEB_BUILD_NO_CACHE \$WEB_BUILD_ARGS -t '\$image' \./);
+  const apiDeploy = release.slice(release.indexOf('deploy_api()'), release.indexOf('deploy_web()'));
+  const webDeploy = release.slice(release.indexOf('deploy_web()'));
+  assert.doesNotMatch(apiDeploy, /WEB_BUILD_ARGS/);
+  assert.match(webDeploy, /docker build \$WEB_BUILD_NO_CACHE \$WEB_BUILD_ARGS -t '\$image' \./);
   assert.match(release, /ADMIN_API_UPSTREAM=/);
   assert.match(release, /docker stop '\$\{API_CONTAINER\}-previous'/);
   assert.match(release, /docker stop '\$\{WEB_CONTAINER\}-previous'/);

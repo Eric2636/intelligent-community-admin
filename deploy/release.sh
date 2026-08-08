@@ -59,7 +59,7 @@ deploy_api() {
   remote "set -euo pipefail
     cd '$remote_dir'
     docker build --target migration -t '$migration_image' .
-    docker build $WEB_BUILD_NO_CACHE $WEB_BUILD_ARGS -t '$image' .
+    docker build -t '$image' .
     docker run --rm --network ic-network --env-file '$API_ENV_FILE' --add-host host.docker.internal:host-gateway '$migration_image' npx prisma migrate deploy
     docker rm -f '${API_CONTAINER}-previous' >/dev/null 2>&1 || true
     if docker inspect '$API_CONTAINER' >/dev/null 2>&1; then docker rename '$API_CONTAINER' '${API_CONTAINER}-previous'; docker stop '${API_CONTAINER}-previous' >/dev/null; fi
@@ -89,7 +89,7 @@ deploy_web() {
   sync_source "$WEB_REPOSITORY" "$remote_dir"
   remote "set -euo pipefail
     cd '$remote_dir'
-    docker build -t '$image' .
+    docker build $WEB_BUILD_NO_CACHE $WEB_BUILD_ARGS -t '$image' .
     docker rm -f '${WEB_CONTAINER}-previous' >/dev/null 2>&1 || true
     if docker inspect '$WEB_CONTAINER' >/dev/null 2>&1; then docker rename '$WEB_CONTAINER' '${WEB_CONTAINER}-previous'; docker stop '${WEB_CONTAINER}-previous' >/dev/null; fi
     docker run -d --name '$WEB_CONTAINER' --restart unless-stopped --network deploy_default -e ADMIN_API_UPSTREAM='$WEB_API_UPSTREAM' -p '$WEB_HOST_PORT:80' '$image' >/dev/null

@@ -85,11 +85,16 @@ deploy_api() {
 deploy_web() {
   info '构建、同步并部署后台管理系统'
   (cd "$WEB_REPOSITORY" && npm run build && node --test test/*.spec.mjs)
-  local image="${WEB_IMAGE_PREFIX}:${WEB_COMMIT}" remote_dir="${REMOTE_RELEASE_ROOT}/${TARGET_ENV}/web-${WEB_COMMIT}"
+  local image="${WEB_IMAGE_PREFIX}:${WEB_COMMIT}" remote_dir="${REMOTE_RELEASE_ROOT}/${TARGET_ENV}/web-${WEB_COMMIT}" web_build_command
+  if [ "$TARGET_ENV" = test ]; then
+    web_build_command="docker build --no-cache --build-arg VITE_APP_BASE=/test-admin/ -t '$image' ."
+  else
+    web_build_command="docker build -t '$image' ."
+  fi
   sync_source "$WEB_REPOSITORY" "$remote_dir"
   remote "set -euo pipefail
     cd '$remote_dir'
-    docker build $WEB_BUILD_NO_CACHE $WEB_BUILD_ARGS -t '$image' .
+    $web_build_command
     docker rm -f '${WEB_CONTAINER}-previous' >/dev/null 2>&1 || true
     if docker inspect '$WEB_CONTAINER' >/dev/null 2>&1; then docker rename '$WEB_CONTAINER' '${WEB_CONTAINER}-previous'; docker stop '${WEB_CONTAINER}-previous' >/dev/null; fi
     docker run -d --name '$WEB_CONTAINER' --restart unless-stopped --network deploy_default -e ADMIN_API_UPSTREAM='$WEB_API_UPSTREAM' -p '$WEB_HOST_PORT:80' '$image' >/dev/null

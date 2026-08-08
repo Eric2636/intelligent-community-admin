@@ -55,7 +55,9 @@ test('发布脚本从本地同步，测试与生产容器严格隔离', () => {
   const apiDeploy = release.slice(release.indexOf('deploy_api()'), release.indexOf('deploy_web()'));
   const webDeploy = release.slice(release.indexOf('deploy_web()'));
   assert.doesNotMatch(apiDeploy, /WEB_BUILD_ARGS/);
-  assert.match(webDeploy, /docker build \$WEB_BUILD_NO_CACHE \$WEB_BUILD_ARGS -t '\$image' \./);
+  assert.match(webDeploy, /TARGET_ENV" = test/);
+  assert.match(webDeploy, /docker build --no-cache --build-arg VITE_APP_BASE=\/test-admin\//);
+  assert.match(webDeploy, /web_build_command/);
   assert.match(release, /ADMIN_API_UPSTREAM=/);
   assert.match(release, /docker stop '\$\{API_CONTAINER\}-previous'/);
   assert.match(release, /docker stop '\$\{WEB_CONTAINER\}-previous'/);

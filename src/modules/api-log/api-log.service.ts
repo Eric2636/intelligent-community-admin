@@ -10,7 +10,7 @@ const int = (v: unknown) => { const n = Number(v); return Number.isInteger(n) ? 
 
 export type ApiLogFilters = {
   page?: number; pageSize?: number; ip?: string; endpointId?: string; method?: string; source?: string;
-  httpStatus?: number; statusClass?: string; startAt?: string; endAt?: string; actorId?: string;
+  httpStatus?: number; statusClass?: string; startAt?: string; endAt?: string; actorId?: string; actorKeyword?: string;
   minDurationMs?: number; maxDurationMs?: number;
 };
 
@@ -26,15 +26,13 @@ function statusFilter(filters: ApiLogFilters) {
   }
   return filters.httpStatus === undefined ? undefined : filters.httpStatus;
 }
-function whereFor(filters: ApiLogFilters, error = false) {
-  const actor = filters.actorId ? { OR: [{ userId: filters.actorId }, { adminId: filters.actorId }] } : {};
+function whereFor(filters: ApiLogFilters, actor: Prisma.ApiRequestLogWhereInput = {}) {
   const status = statusFilter(filters);
   return {
     ...(filters.ip ? { ip: filters.ip } : {}), ...(filters.endpointId ? { endpointId: filters.endpointId } : {}),
     ...(filters.method ? { method: filters.method.toUpperCase() } : {}), ...(filters.source ? { source: filters.source.toUpperCase() } : {}),
     ...(status ? { httpStatus: status } : {}), ...(filters.minDurationMs !== undefined || filters.maxDurationMs !== undefined ? { durationMs: { ...(filters.minDurationMs !== undefined ? { gte: filters.minDurationMs } : {}), ...(filters.maxDurationMs !== undefined ? { lte: filters.maxDurationMs } : {}) } } : {}),
     ...dateFilter(filters), ...actor,
-    ...(error ? {} : {}),
   } as Prisma.ApiRequestLogWhereInput;
 }
 const serialize = <T extends { id: bigint; createdAt: Date }>(row: T) => ({ ...row, id: row.id.toString(), createdAt: row.createdAt.toISOString() });
@@ -97,7 +95,7 @@ export class ApiLogService {
   async listErrors(filters: ApiLogFilters) { return this.listRequests({ ...filters, statusClass: filters.statusClass || '4xx' }); }
   private async listLogs(filters: ApiLogFilters) {
     const page = Math.max(1, filters.page ?? 1), pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, filters.pageSize ?? 20));
-    const where = whereFor(filters);
+    const where = whereFor(filters, await this.actorWhere(filters));
     const repo = this.db.apiRequestLog as unknown as { count(args: unknown): Promise<number>; findMany(args: unknown): Promise<Array<{ id: bigint; createdAt: Date; [key: string]: unknown }>> };
     const [total, rows] = await Promise.all([repo.count({ where }), repo.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * pageSize, take: pageSize })]);
     const serialized = rows.map(serialize) as Array<Record<string, unknown>>;
@@ -125,15 +123,41 @@ export class ApiLogService {
     };
   }
   async exportRequests(filters: ApiLogFilters) {
-    const rows = await (this.db.apiRequestLog as unknown as { findMany(args: unknown): Promise<Array<{ id: bigint; createdAt: Date; [key: string]: unknown }>> }).findMany({ where: whereFor(filters), orderBy: { createdAt: 'desc' }, take: MAX_EXPORT });
+    const rows = await (this.db.apiRequestLog as unknown as { findMany(args: unknown): Promise<Array<{ id: bigint; createdAt: Date; [key: string]: unknown }>> }).findMany({ where: whereFor(filters, await this.actorWhere(filters)), orderBy: { createdAt: 'desc' }, take: MAX_EXPORT });
     const headers = ['time', 'source', 'method', 'requestUrl', 'ip', 'actorId', 'httpStatus', 'businessCode', 'durationMs', 'requestId'];
     const esc = (v: unknown) => `"${String(v ?? '').replaceAll('"', '""')}"`;
     const body = rows.map((r) => [r.createdAt.toISOString(), r.source, r.method, r.requestUrl, r.ip, r.userId || r.adminId || '', r.httpStatus, r.businessCode, r.durationMs, r.requestId].map(esc).join(',')).join('\n');
     return `\uFEFF${headers.join(',')}\n${body}`;
   }
   async exportAccess(filters: ApiLogFilters) { return this.exportRequests(filters); }
+
+  private async actorWhere(filters: ApiLogFilters): Promise<Prisma.ApiRequestLogWhereInput> {
+    const keyword = scalar(filters.actorKeyword) || scalar(filters.actorId);
+    if (!keyword) return {};
+    const db = this.db as typeof prisma;
+    const [users, admins] = await Promise.all([
+      db.user.findMany({
+        where: { OR: [{ id: { contains: keyword } }, { name: { contains: keyword } }, { phoneNumber: { contains: keyword } }] },
+        select: { id: true },
+        take: 100,
+      }),
+      db.adminUser.findMany({
+        where: { OR: [{ id: { contains: keyword } }, { username: { contains: keyword } }] },
+        select: { id: true },
+        take: 100,
+      }),
+    ]);
+    const conditions: Prisma.ApiRequestLogWhereInput[] = [];
+    if (users.length) conditions.push({ userId: { in: users.map((user) => user.id) } });
+    if (admins.length) conditions.push({ adminId: { in: admins.map((admin) => admin.id) } });
+    return conditions.length ? { OR: conditions } : { OR: [{ userId: keyword }, { adminId: keyword }] };
+  }
 }
 
 export function parseApiLogFilters(query: Record<string, unknown>): ApiLogFilters {
-  return { page: int(query.page), pageSize: int(query.pageSize), ip: scalar(query.ip), endpointId: scalar(query.endpointId), method: scalar(query.method), source: scalar(query.source), httpStatus: int(query.httpStatus), statusClass: scalar(query.statusClass), startAt: scalar(query.startAt), endAt: scalar(query.endAt), actorId: scalar(query.actorId), minDurationMs: int(query.minDurationMs), maxDurationMs: int(query.maxDurationMs) };
+  const actorKeyword = scalar(query.actorKeyword);
+  return {
+    page: int(query.page), pageSize: int(query.pageSize), ip: scalar(query.ip), endpointId: scalar(query.endpointId), method: scalar(query.method), source: scalar(query.source), httpStatus: int(query.httpStatus), statusClass: scalar(query.statusClass), startAt: scalar(query.startAt), endAt: scalar(query.endAt), actorId: scalar(query.actorId), minDurationMs: int(query.minDurationMs), maxDurationMs: int(query.maxDurationMs),
+    ...(actorKeyword ? { actorKeyword } : {}),
+  };
 }

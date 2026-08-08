@@ -50,7 +50,8 @@ test('发布预检只校验所选发布范围对应的仓库', () => {
   assert.match(preflight, /3\)[\s\S]*require_clean_branch "\$API_REPOSITORY" "\$TARGET_BRANCH"[\s\S]*require_clean_branch "\$WEB_REPOSITORY" "\$TARGET_BRANCH"/);
   const scopeOne = preflight.slice(preflight.indexOf('1)'), preflight.indexOf('2)'));
   const scopeTwo = preflight.slice(preflight.indexOf('2)'), preflight.indexOf('3)'));
-  assert.match(scopeOne, /API_ENV_FILE[\s\S]*API_BACKUP_ENV_FILE/);
+  assert.match(scopeOne, /API_ENV_FILE/);
+  assert.doesNotMatch(scopeOne, /API_BACKUP_ENV_FILE/);
   assert.match(scopeTwo, /docker network inspect deploy_default/);
   assert.doesNotMatch(scopeTwo, /API_ENV_FILE|API_BACKUP_ENV_FILE/);
 });
@@ -65,15 +66,18 @@ test('发布脚本从本地同步，测试与生产容器严格隔离', () => {
   assert.match(testEntry, /API_CONTAINER=ic-test-admin-api/);
   assert.match(testEntry, /WEB_CONTAINER=ic-test-admin-web/);
   assert.match(testEntry, /API_PORT_ARGS='-p 3002:3000'/);
+  assert.match(testEntry, /API_BACKUP_ENV_FILE=.*\.env\.test\.backup/);
   assert.match(testEntry, /WEB_API_UPSTREAM=api-test:3000/);
   assert.doesNotMatch(testEntry, /WEB_BUILD_ARGS|WEB_BUILD_NO_CACHE/);
   assert.match(productionEntry, /API_CONTAINER=ic-admin-api/);
   assert.match(productionEntry, /WEB_CONTAINER=ic-admin-web/);
+  assert.match(productionEntry, /^API_BACKUP_ENV_FILE=$/m);
   assert.match(productionEntry, /^API_PORT_ARGS=$/m);
   assert.doesNotMatch(productionEntry, /WEB_BUILD_ARGS|WEB_BUILD_NO_CACHE/);
   const apiDeploy = release.slice(release.indexOf('deploy_api()'), release.indexOf('deploy_web()'));
   const webDeploy = release.slice(release.indexOf('deploy_web()'));
   assert.doesNotMatch(apiDeploy, /WEB_BUILD_ARGS/);
+  assert.match(apiDeploy, /backup_env_args/);
   assert.match(webDeploy, /TARGET_ENV" = test/);
   assert.match(webDeploy, /docker build --no-cache --build-arg VITE_APP_BASE=\/test-admin\//);
   assert.match(webDeploy, /web_build_command/);

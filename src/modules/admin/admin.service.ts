@@ -18,7 +18,7 @@ import { MallCategoryService } from '../mall/mall-category.service';
 import { MallCommentService } from '../mall/mall-comment.service';
 import { jsonImages } from '../mall/mall.serialize';
 import { avatarOrDefault } from '../user/default-avatar';
-import { contentIdentityTag } from '../user/user-identity';
+import { resolveEffectiveUserTags } from '../user/user-identity';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { runAdminContentMutation } from './admin-content-mutation';
 import {
@@ -68,27 +68,6 @@ export type AdminOperator = {
 
 export const DEFAULT_SUPER_ADMIN_ORG_NAME = '平台管理员';
 
-export function adminDisplayLabelForContent(admin: { role: 'ADMIN' | 'SUPERADMIN'; orgName?: string | null }) {
-  if (admin.role === 'SUPERADMIN') return DEFAULT_SUPER_ADMIN_ORG_NAME;
-  return admin.orgName?.trim() || '网站管理员';
-}
-
-export function adminContentAttributionForMiniPublisher(
-  admin: {
-    id: string;
-    role: 'ADMIN' | 'SUPERADMIN';
-    orgName?: string | null;
-  } | null,
-) {
-  if (!admin) return {};
-  return {
-    adminLabel: adminDisplayLabelForContent(admin),
-    createdByAdminId: admin.id,
-  };
-}
-
-export const adminContentAttributionForMiniPost = adminContentAttributionForMiniPublisher;
-
 function adminJwtSecret() {
   return process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET;
 }
@@ -130,6 +109,7 @@ const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
 
 const FORUM_POST_TYPE_SET = new Set(['NORMAL', 'ANNOUNCEMENT']);
+const ADMIN_ANNOUNCEMENT_AUTHOR_ID = '__admin_announcement__';
 
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
@@ -541,28 +521,17 @@ export class AdminService {
       }),
     ]);
 
-    const userIds = rows.map((row) => row.id);
-    const boundAdmins = userIds.length
-      ? await prisma.adminUser.findMany({
-          where: { boundUserId: { in: userIds }, enabled: true },
-          select: { boundUserId: true, role: true, orgName: true },
-        })
-      : [];
-    const adminLabelByUserId = new Map(
-      boundAdmins
-        .filter((admin) => admin.boundUserId)
-        .map((admin) => [admin.boundUserId!, adminDisplayLabelForContent(admin)]),
-    );
+    const tags = await resolveEffectiveUserTags(prisma, rows.map((row) => row.id));
 
     return {
       total,
       list: rows.map((row) => {
-        const { identityType, ...user } = row;
-        const tag = contentIdentityTag(identityType, adminLabelByUserId.get(row.id) ?? '');
+        const { identityType: _identityType, ...user } = row;
+        const tag = tags.get(row.id) ?? { label: '', type: '' };
         return {
           ...user,
-          contentTagLabel: tag.label,
-          contentTagType: tag.type,
+          userTagLabel: tag.label,
+          userTagType: tag.type,
           disabledAt: row.disabledAt ? row.disabledAt.toISOString() : '',
           createdAt: row.createdAt.toISOString(),
           updatedAt: row.updatedAt.toISOString(),
@@ -838,6 +807,7 @@ export class AdminService {
       pageSize: number;
       keyword?: string;
       visibility?: 'ONLINE' | 'OFFLINE';
+      authorKeyword?: string;
     },
   ) {
     if (type === 'posts') return this.listPosts(params);
@@ -1101,10 +1071,20 @@ export class AdminService {
     pageSize: number;
     keyword?: string;
     visibility?: 'ONLINE' | 'OFFLINE';
+    authorKeyword?: string;
   }) {
     const keyword = params.keyword?.trim();
+    const authorKeyword = params.authorKeyword?.trim();
+    const authorIds = authorKeyword
+      ? (await prisma.user.findMany({
+          where: { OR: [{ id: { contains: authorKeyword } }, { name: { contains: authorKeyword } }] },
+          select: { id: true },
+          take: 500,
+        })).map((user) => user.id)
+      : [];
     const where: Prisma.ForumPostWhereInput = {
       ...this.visibilityWhere(params.visibility),
+      ...(authorKeyword ? { authorId: { in: authorIds } } : {}),
       ...(keyword
         ? {
             OR: [{ title: { contains: keyword } }, { content: { contains: keyword } }],
@@ -1229,11 +1209,11 @@ export class AdminService {
     actorUserId: string | undefined | null,
     operator: AdminOperator,
   ): Promise<string> {
-    if (operator.role === 'SUPERADMIN') return this.resolveActorUserId(actorUserId);
     const admin = await prisma.adminUser.findUnique({
       where: { id: operator.adminId },
-      select: { boundUserId: true },
+      select: { boundUserId: true, enabled: true },
     });
+    if (!admin?.enabled) throw new HttpError(403, '管理员账号不可用，无法发布内容');
     const bound = admin?.boundUserId?.trim();
     if (!bound) {
       throw new HttpError(403, '未绑定小程序用户，无法发布内容，请联系超级管理员绑定用户');
@@ -1244,9 +1224,10 @@ export class AdminService {
     }
     const u = await prisma.user.findUnique({
       where: { id: bound },
-      select: { id: true },
+      select: { id: true, enabled: true },
     });
     if (!u) throw new HttpError(400, '管理员绑定的用户不存在，请重新绑定');
+    if (!u.enabled) throw new HttpError(403, '管理员绑定的小程序用户已被冻结，无法发布内容');
     return bound;
   }
 
@@ -1299,21 +1280,15 @@ export class AdminService {
     dto: AdminCreateContentDto,
     operator: AdminOperator,
   ) {
-    const actorId = await this.resolveActorUserIdForAdmin(dto.actorUserId, operator);
+    const postType = type === 'posts' ? parseForumPostType(dto.postType) : 'NORMAL';
+    const actorId = postType === 'ANNOUNCEMENT' ? '' : await this.resolveActorUserIdForAdmin(dto.actorUserId, operator);
     const vis = dto.visibility ?? 'ONLINE';
     const pin = dto.pinned ?? false;
-    const op = await prisma.adminUser.findUnique({
-      where: { id: operator.adminId },
-      select: { role: true, orgName: true },
-    });
-    const adminLabel = op ? adminDisplayLabelForContent(op) : '网站管理员';
-
     return runAdminContentMutation(prisma, async (tx) => {
-      await lockUsersForProfileSnapshot(tx, [actorId]);
+      if (actorId) await lockUsersForProfileSnapshot(tx, [actorId]);
       if (type === 'posts') {
         const title = (dto.title || '').trim();
         const content = (dto.content || '').trim();
-        const postType = parseForumPostType(dto.postType);
         const validUntil = parseAnnouncementValidUntil(dto.validUntil, postType);
         const images = parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images');
         const videos = parseStrictMediaUrlList(dto.videos, MAX_POST_VIDEOS, 'video', 'videos');
@@ -1321,21 +1296,19 @@ export class AdminService {
         if (!content && images.length === 0 && videos.length === 0) {
           throw new HttpError(400, '请输入内容或添加图片/视频');
         }
-        const author = await tx.user.findUnique({
-          where: { id: actorId },
-          select: { name: true, avatar: true, identityType: true },
-        });
+        const author = actorId
+          ? await tx.user.findUnique({ where: { id: actorId }, select: { name: true, avatar: true } })
+          : null;
         const row = await tx.forumPost.create({
           data: {
             title,
             content,
             images: images.length ? jsonMedia(images) : undefined,
             videos: videos.length ? jsonMedia(videos) : undefined,
-            authorId: actorId,
-            authorName: author?.name ?? '',
+            // 公告由后台管理员直接发布，不对应任意真实小程序用户。
+            authorId: actorId || ADMIN_ANNOUNCEMENT_AUTHOR_ID,
+            authorName: author?.name ?? (postType === 'ANNOUNCEMENT' ? '系统公告' : ''),
             authorAvatar: author?.avatar ?? null,
-            authorIdentity: author?.identityType ?? null,
-            adminLabel,
             createdByAdminId: operator.adminId,
             postType,
             validUntil,
@@ -1391,7 +1364,6 @@ export class AdminService {
             publisherId: actorId,
             publisherName: publisher?.name ?? '',
             publisherAvatar: publisher?.avatar ?? null,
-            adminLabel,
             createdByAdminId: operator.adminId,
             visibility: vis,
             pinned: pin,
@@ -1422,7 +1394,7 @@ export class AdminService {
       }
       const publisher = await tx.user.findUnique({
         where: { id: actorId },
-        select: { name: true, avatar: true, identityType: true },
+        select: { name: true, avatar: true },
       });
       const row = await tx.task.create({
         data: {
@@ -1436,8 +1408,6 @@ export class AdminService {
           publisherId: actorId,
           publisherName: publisher?.name ?? '',
           publisherAvatar: publisher?.avatar ?? null,
-          publisherIdentity: publisher?.identityType ?? null,
-          adminLabel,
           createdByAdminId: operator.adminId,
           visibility: vis,
           pinned: pin,
@@ -1528,12 +1498,11 @@ export class AdminService {
         if (dto.actorUserId !== undefined) {
           const author = await tx.user.findUnique({
             where: { id: actorId! },
-            select: { name: true, avatar: true, identityType: true },
+            select: { name: true, avatar: true },
           });
           data.authorId = actorId!;
           data.authorName = author?.name ?? '';
           data.authorAvatar = author?.avatar ?? null;
-          data.authorIdentity = author?.identityType ?? null;
         }
         const row = await tx.forumPost.update({ where: { id }, data });
         return {
@@ -1654,12 +1623,11 @@ export class AdminService {
       if (dto.actorUserId !== undefined) {
         const publisher = await tx.user.findUnique({
           where: { id: actorId! },
-          select: { name: true, avatar: true, identityType: true },
+          select: { name: true, avatar: true },
         });
         data.publisherId = actorId!;
         data.publisherName = publisher?.name ?? '';
         data.publisherAvatar = publisher?.avatar ?? null;
-        data.publisherIdentity = publisher?.identityType ?? null;
       }
       const row = await updateAdminTaskContentCas(tx, {
         id,

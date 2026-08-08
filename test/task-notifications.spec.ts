@@ -24,8 +24,6 @@ type TaskRow = {
   publisherId: string;
   publisherName: string | null;
   publisherAvatar: string | null;
-  publisherIdentity: string | null;
-  adminLabel: string | null;
   takerId: string | null;
   takerName: string | null;
   takerAvatar: string | null;
@@ -196,8 +194,6 @@ function task(overrides: Partial<TaskRow> = {}): TaskRow {
     publisherId: 'user-a',
     publisherName: '小王',
     publisherAvatar: null,
-    publisherIdentity: 'OWNER',
-    adminLabel: null,
     takerId: null,
     takerName: null,
     takerAvatar: null,

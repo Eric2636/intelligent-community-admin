@@ -91,7 +91,6 @@ const offlineItem = {
   publisherId: 'publisher-1',
   publisherName: 'publisher',
   publisherAvatar: null,
-  adminLabel: null,
   visibility: 'OFFLINE',
   pinned: false,
   deletedAt: null,

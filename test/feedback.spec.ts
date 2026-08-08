@@ -166,6 +166,9 @@ test('feedback admin list filters by nickname/content, identity and time and ret
         ];
       },
     },
+    adminUser: {
+      findMany: async () => [],
+    },
     feedback: {
       count: async (args: unknown) => {
         feedbackCalls.push({ method: 'count', args });
@@ -230,18 +233,19 @@ test('feedback admin list filters by nickname/content, identity and time and ret
   });
   assert.equal(result.total, 2);
   assert.equal(result.list[0].nickname, '微信用户');
-  assert.equal(result.list[0].avatar, '/static/avatar1.png');
-  assert.equal(result.list[0].identityLabel, '业主');
+  assert.equal(result.list[0].avatar, '');
+  assert.equal(result.list[0].userTagLabel, '业主');
+  assert.equal(result.list[0].userTagType, 'owner');
   assert.equal(result.list[0].createdAt, '2026-07-29T02:00:00.000Z');
   assert.deepEqual(Object.keys(result.list[0]).sort(), [
     'avatar',
     'content',
     'createdAt',
     'id',
-    'identity',
-    'identityLabel',
     'nickname',
     'userId',
+    'userTagLabel',
+    'userTagType',
   ]);
 });
 

@@ -109,7 +109,8 @@ model AdminUser {
   updatedAt    DateTime  @default(now()) @updatedAt
 
   @@index([role, enabled])
-  @@index([boundUserId])
+  /// 一个小程序用户最多绑定一个后台管理员；标签展示以该实时绑定关系为准。
+  @@unique([boundUserId])
 }
 
 /// 后台系统日志（仅超级管理员可查看）
@@ -274,9 +275,6 @@ model Task {
   publisherId       String
   publisherName     String?
   publisherAvatar   String?
-  publisherIdentity String?
-  /// 后台发布标签：所属单位或“网站管理员”
-  adminLabel        String?
   /// 标记内容由哪个后台管理员创建（用于审计/展示）
   createdByAdminId  String?
   takerId           String?
@@ -308,9 +306,6 @@ model ForumPost {
   authorId         String
   authorName       String?
   authorAvatar     String?
-  authorIdentity   String?
-  /// 后台发布标签：所属单位或“网站管理员”
-  adminLabel       String?
   /// 标记内容由哪个后台管理员创建（用于审计/展示）
   createdByAdminId String?
   postType         ForumPostType     @default(NORMAL)
@@ -347,7 +342,6 @@ model ForumReply {
   authorId          String
   authorName        String?
   authorAvatar      String?
-  authorIdentity    String?
   content           String   @db.Text
   images            Json?
   videos            Json?
@@ -488,8 +482,6 @@ model MallItem {
   publisherId      String
   publisherName    String?
   publisherAvatar  String?
-  /// 后台发布标签：所属单位或“网站管理员”
-  adminLabel       String?
   /// 标记内容由哪个后台管理员创建（用于审计/展示）
   createdByAdminId String?
   visibility       ContentVisibility @default(ONLINE)

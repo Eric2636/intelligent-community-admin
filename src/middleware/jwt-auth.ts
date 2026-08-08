@@ -110,23 +110,21 @@ async function requiredJwtAuth(
   }
   ctx.state.user = result.user;
 
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(ctx.method)) {
-    const user = dependencies.findUser
-      ? await dependencies.findUser(ctx.state.user.userId)
-      : await prisma.user.findUnique({
-          where: { id: ctx.state.user.userId },
-          select: { enabled: true },
-        });
-    if (!user) {
-      ctx.status = 401;
-      ctx.body = { statusCode: 401, message: '用户不存在' };
-      return;
-    }
-    if (!user.enabled) {
-      ctx.status = 403;
-      ctx.body = { statusCode: 403, message: '账号已被冻结，暂不能进行发布、评论、点赞等操作' };
-      return;
-    }
+  const user = dependencies.findUser
+    ? await dependencies.findUser(ctx.state.user.userId)
+    : await prisma.user.findUnique({
+        where: { id: ctx.state.user.userId },
+        select: { enabled: true },
+      });
+  if (!user) {
+    ctx.status = 401;
+    ctx.body = { statusCode: 401, message: '用户不存在' };
+    return;
+  }
+  if (!user.enabled) {
+    ctx.status = 403;
+    ctx.body = { statusCode: 403, message: '账号已被冻结，请联系管理员' };
+    return;
   }
 
   // 注意：业务处理里的异常应交给 errorHandler 返回 4xx/5xx，不应被当作鉴权失败吞掉

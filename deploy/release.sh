@@ -11,7 +11,7 @@ WEB_REPOSITORY="$(cd "$API_REPOSITORY/../intelligent-community-admin-web" && pwd
 
 die() { printf '发布已停止：%s\n' "$*" >&2; exit 1; }
 info() { printf '\n== %s ==\n' "$*"; }
-remote() { ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=20 "${REMOTE_USER}@${REMOTE_HOST}" "$@"; }
+remote() { ssh -n -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=20 "${REMOTE_USER}@${REMOTE_HOST}" "$@"; }
 
 require_clean_branch() {
   local repository="$1" expected="$2"

@@ -96,3 +96,24 @@ test('父级目录是唯一发布入口，后端旧入口只负责兼容转发',
   assert.match(legacyTestEntry, /exec "\$PROJECT_ROOT\/deploy-test\.sh"/);
   assert.match(legacyProductionEntry, /exec "\$PROJECT_ROOT\/deploy-production\.sh"/);
 });
+
+test('一键发布从开发分支提交并合并到对应环境分支，再部署后切回开发分支', () => {
+  const release = workspaceSource('release.sh');
+  const testEntry = workspaceSource('deploy-test.sh');
+  const productionEntry = workspaceSource('deploy-production.sh');
+
+  assert.match(testEntry, /^SOURCE_BRANCH=dev$/m);
+  assert.match(testEntry, /^TARGET_BRANCH=test$/m);
+  assert.match(productionEntry, /^SOURCE_BRANCH=dev$/m);
+  assert.match(productionEntry, /^TARGET_BRANCH=master$/m);
+  assert.match(release, /git -C "\$repository" add -A/);
+  assert.match(release, /git -C "\$repository" commit -m/);
+  assert.match(release, /git -C "\$repository" push origin "\$SOURCE_BRANCH"/);
+  assert.match(release, /git -C "\$repository" merge --no-ff "\$SOURCE_BRANCH"/);
+  assert.match(release, /git -C "\$repository" push origin "\$TARGET_BRANCH"/);
+  assert.match(release, /git -C "\$repository" switch "\$SOURCE_BRANCH"/);
+  assert.match(release, /确认暂存、提交、合并并推送/);
+  const prepare = release.slice(release.indexOf('prepare_source_repositories()'), release.indexOf('return_to_source_branches()'));
+  assert.match(prepare, /if \[ "\$\(git -C "\$repository" branch --show-current\)" != "\$SOURCE_BRANCH" \]; then\n\s+require_clean_repository "\$repository"/);
+  assert.doesNotMatch(prepare, /for repository in "\$\{SELECTED_REPOSITORIES\[@\]\}"; do\n\s+require_clean_repository/);
+});

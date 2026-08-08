@@ -8,13 +8,13 @@ type TokenResponse = {
   errmsg?: string;
 };
 
-type GetToken = (url: string, options: object) => Promise<{ data?: TokenResponse }>;
+type PostStableToken = (url: string, body: object) => Promise<{ data?: TokenResponse }>;
 
 export class WechatAccessTokenService {
   private cachedToken = '';
   private expiresAt = 0;
 
-  constructor(private readonly get: GetToken = axios.get) {}
+  constructor(private readonly dependencies: { post?: PostStableToken } = {}) {}
 
   async getAccessToken() {
     const now = Date.now();
@@ -22,9 +22,12 @@ export class WechatAccessTokenService {
     const appid = process.env.WX_APPID;
     const secret = process.env.WX_APPSECRET;
     if (!appid || !secret) throw new HttpError(503, '微信服务配置不完整');
-    const response = await this.get('https://api.weixin.qq.com/cgi-bin/token', {
-      params: { grant_type: 'client_credential', appid, secret },
-      timeout: 10_000,
+    const post = this.dependencies.post ?? ((url, body) => axios.post(url, body, { timeout: 10_000 }));
+    const response = await post('https://api.weixin.qq.com/cgi-bin/stable_token', {
+      grant_type: 'client_credential',
+      appid,
+      secret,
+      force_refresh: false,
     });
     const data = response.data || {};
     if (!data.access_token) throw new HttpError(503, data.errmsg || '微信 access_token 获取失败');

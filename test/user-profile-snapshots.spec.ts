@@ -70,11 +70,21 @@ function withDefaultAvatarEnv(value: string | undefined, callback: () => void): 
   }
 }
 
-test('Prisma models persist task and forum author profile snapshots', () => {
+test('Prisma models retain profile snapshots but not user-tag snapshots', () => {
   assertOptionalStringField('Task', 'publisherAvatar');
   assertOptionalStringField('Task', 'takerAvatar');
   assertOptionalStringField('ForumReply', 'authorAvatar');
   assertOptionalStringField('ForumReply', 'replyToUserId');
+  for (const [model, field] of [
+    ['Task', 'publisherIdentity'],
+    ['Task', 'adminLabel'],
+    ['ForumPost', 'authorIdentity'],
+    ['ForumPost', 'adminLabel'],
+    ['ForumReply', 'authorIdentity'],
+    ['MallItem', 'adminLabel'],
+  ]) {
+    assert.doesNotMatch(modelBody(model), new RegExp(`^\\s*${field}\\s+`, 'm'));
+  }
 });
 
 test('Prisma models persist mall author and order profile snapshots', () => {
@@ -111,14 +121,14 @@ test('author snapshot migration backfills every retained profile snapshot with M
   for (const table of ['Task', 'forum_posts', 'forum_replies', 'mall_items', 'mall_item_comments', 'mall_orders']) {
     assert.match(migration, new RegExp(`UPDATE\\s+\`${table}\`\\s+AS\\s+`, 'i'), `${table} must be backfilled`);
   }
-  assert.match(migration, /UPDATE\s+`Task`[\s\S]*publisherName[\s\S]*publisherAvatar[\s\S]*publisherIdentity/i);
+  assert.match(migration, /UPDATE\s+`Task`[\s\S]*publisherName[\s\S]*publisherAvatar/i);
   assert.match(migration, /UPDATE\s+`Task`[\s\S]*takerName[\s\S]*takerAvatar/i);
   assert.match(
     migration,
-    /UPDATE\s+`forum_posts`\s+AS\s+`post`\s+JOIN\s+`User`\s+AS\s+`author`\s+ON\s+`author`\.`id`\s*=\s*`post`\.`authorId`\s+SET\s+`post`\.`authorName`\s*=\s*`author`\.`name`,\s+`post`\.`authorAvatar`\s*=\s*NULLIF\(TRIM\(`author`\.`avatar`\),\s*''\),\s+`post`\.`authorIdentity`\s*=\s*`author`\.`identityType`;/i,
+    /UPDATE\s+`forum_posts`\s+AS\s+`post`\s+JOIN\s+`User`\s+AS\s+`author`\s+ON\s+`author`\.`id`\s*=\s*`post`\.`authorId`\s+SET\s+`post`\.`authorName`\s*=\s*`author`\.`name`,\s+`post`\.`authorAvatar`\s*=\s*NULLIF\(TRIM\(`author`\.`avatar`\),\s*''\)/i,
     'forum_posts must backfill all author snapshots from its authorId relation',
   );
-  assert.match(migration, /UPDATE\s+`forum_replies`[\s\S]*authorName[\s\S]*authorAvatar[\s\S]*authorIdentity/i);
+  assert.match(migration, /UPDATE\s+`forum_replies`[\s\S]*authorName[\s\S]*authorAvatar/i);
   assert.match(
     migration,
     /UPDATE\s+`forum_replies`[\s\S]*JOIN\s+`forum_replies`[\s\S]*parentReplyId[\s\S]*replyToUserId[\s\S]*replyToAuthorName/i,
@@ -158,38 +168,29 @@ test('snapshot synchronization lookup indexes exist in schema and migration', ()
   }
 });
 
-test('avatarOrDefault uses the mini program fallback when no environment override exists', () => {
+test('avatarOrDefault preserves an empty value for the mini program vector avatar fallback', () => {
   withDefaultAvatarEnv(undefined, () => {
-    assert.equal(avatarOrDefault(null), '/static/avatar1.png');
-    assert.equal(avatarOrDefault('   '), '/static/avatar1.png');
+    assert.equal(avatarOrDefault(null), '');
+    assert.equal(avatarOrDefault('   '), '');
   });
 });
 
-test('avatarOrDefault ignores a blank DEFAULT_AVATAR_URL environment override', () => {
+test('avatarOrDefault never uses DEFAULT_AVATAR_URL as a default image', () => {
   withDefaultAvatarEnv('   ', () => {
-    assert.equal(avatarOrDefault(undefined), '/static/avatar1.png');
+    assert.equal(avatarOrDefault(undefined), '');
   });
 });
 
-test('avatarOrDefault prefers an existing avatar then DEFAULT_AVATAR_URL', () => {
+test('avatarOrDefault preserves an existing avatar only', () => {
   withDefaultAvatarEnv('https://cdn.example.com/default-avatar.png', () => {
     assert.equal(avatarOrDefault(' https://cdn.example.com/user.png '), 'https://cdn.example.com/user.png');
-    assert.equal(avatarOrDefault(undefined), 'https://cdn.example.com/default-avatar.png');
+    assert.equal(avatarOrDefault(undefined), '');
   });
 });
 
-test('production requires an absolute HTTP(S) default avatar URL', () => {
-  assert.throws(() => validateDefaultAvatarConfiguration('production', undefined), /DEFAULT_AVATAR_URL/);
-  assert.throws(() => validateDefaultAvatarConfiguration('production', '/static/avatar1.png'), /HTTP\(S\)/);
-  assert.equal(
-    validateDefaultAvatarConfiguration('production', 'https://cdn.example.com/default.png'),
-    'https://cdn.example.com/default.png',
-  );
-});
-
-test('development and test retain the mini program relative avatar fallback', () => {
-  assert.equal(validateDefaultAvatarConfiguration('development', undefined), '/static/avatar1.png');
-  assert.equal(validateDefaultAvatarConfiguration('test', '/static/avatar1.png'), '/static/avatar1.png');
+test('runtime configuration no longer requires a bitmap default avatar', () => {
+  assert.equal(validateDefaultAvatarConfiguration('production', undefined), '');
+  assert.equal(validateDefaultAvatarConfiguration('development', '/static/avatar1.png'), '');
 });
 
 test('package exposes the standard full test command', () => {
@@ -221,7 +222,7 @@ test('updateMe synchronizes every retained profile snapshot in its transaction',
   assert.doesNotMatch(profileSyncService, /data:\s*\{\s*adminLabel:/);
 });
 
-test('profile snapshot synchronization covers publisher, taker, reply target, seller and buyer roles', () => {
+test('profile snapshot synchronization covers names and avatars but never identity tags', () => {
   const requiredWhereClauses = [
     /publisherId:\s*userId/,
     /takerId:\s*userId/,
@@ -235,12 +236,10 @@ test('profile snapshot synchronization covers publisher, taker, reply target, se
   const requiredSnapshotFields = [
     'publisherName',
     'publisherAvatar',
-    'publisherIdentity',
     'takerName',
     'takerAvatar',
     'authorName',
     'authorAvatar',
-    'authorIdentity',
     'replyToAuthorName',
     'sellerName',
     'sellerAvatar',
@@ -250,13 +249,15 @@ test('profile snapshot synchronization covers publisher, taker, reply target, se
   for (const field of requiredSnapshotFields) {
     assert.match(profileSyncService, new RegExp(`\\b${field}\\b`), `${field} must be synchronized`);
   }
+  assert.doesNotMatch(profileSyncService, /publisherIdentity\s*=/);
+  assert.doesNotMatch(profileSyncService, /authorIdentity\s*=/);
 });
 
 test('creation paths persist profile snapshots read by the server', () => {
-  for (const field of ['publisherName', 'publisherAvatar', 'publisherIdentity', 'takerName', 'takerAvatar']) {
+  for (const field of ['publisherName', 'publisherAvatar', 'takerName', 'takerAvatar']) {
     assert.match(taskService, new RegExp(`\\b${field}\\b`), `task creation/claim must write ${field}`);
   }
-  for (const field of ['authorName', 'authorAvatar', 'authorIdentity', 'replyToUserId']) {
+  for (const field of ['authorName', 'authorAvatar', 'replyToUserId']) {
     assert.match(forumService, new RegExp(`\\b${field}\\b`), `forum creation must write ${field}`);
   }
   for (const field of ['publisherName', 'publisherAvatar']) {
@@ -287,9 +288,10 @@ test('all snapshot creation and actor-transfer paths acquire the shared user row
   }
 });
 
-test('admin content creation and actor edits retain labels while refreshing snapshots', () => {
-  assert.match(adminService, /adminLabel,/);
-  for (const field of ['authorAvatar', 'authorIdentity', 'publisherName', 'publisherAvatar', 'publisherIdentity']) {
+test('admin content creation retains audit actor data without writing label snapshots', () => {
+  assert.doesNotMatch(adminService, /adminLabel,/);
+  assert.match(adminService, /createdByAdminId:\s*operator\.adminId/);
+  for (const field of ['authorAvatar', 'publisherName', 'publisherAvatar']) {
     assert.match(adminService, new RegExp(`\\b${field}\\b`), `admin content must write ${field}`);
   }
 });
@@ -311,7 +313,7 @@ test('admin task, forum and mall list/detail output also applies the avatar fall
   assert.match(adminService, /authorAvatar:\s*avatarOrDefault\(r\.authorAvatar\)/);
 });
 
-test('task, forum, mall item and order serializers never return blank avatars', () => {
+test('task, forum, mall item and order serializers leave missing avatars empty for TDesign icons', () => {
   withDefaultAvatarEnv(undefined, () => {
     const now = new Date('2026-07-26T00:00:00.000Z');
     const task = (
@@ -333,8 +335,6 @@ test('task, forum, mall item and order serializers never return blank avatars', 
       publisherId: 'publisher-1',
       publisherName: '发布者',
       publisherAvatar: null,
-      publisherIdentity: null,
-      adminLabel: null,
       takerId: null,
       takerName: null,
       takerAvatar: null,
@@ -345,8 +345,8 @@ test('task, forum, mall item and order serializers never return blank avatars', 
       completedAt: null,
       confirmedAt: null,
     });
-    assert.equal(task.publisherAvatar, '/static/avatar1.png');
-    assert.equal(task.takerAvatar, '/static/avatar1.png');
+    assert.equal(task.publisherAvatar, '');
+    assert.equal(task.takerAvatar, '');
 
     const forum = (
       new ForumService() as unknown as {
@@ -366,9 +366,7 @@ test('task, forum, mall item and order serializers never return blank avatars', 
         videos: [],
         authorId: 'author-1',
         authorName: '作者',
-        authorIdentity: null,
         authorAvatar: null,
-        adminLabel: null,
         likeCount: 0,
         replyCount: 0,
         createdAt: now,
@@ -377,7 +375,7 @@ test('task, forum, mall item and order serializers never return blank avatars', 
       false,
       false,
     );
-    assert.equal(forum.authorAvatar, '/static/avatar1.png');
+    assert.equal(forum.authorAvatar, '');
 
     const item = serializeMallItem({
       id: 'item-1',
@@ -397,7 +395,7 @@ test('task, forum, mall item and order serializers never return blank avatars', 
       createdAt: now,
       updatedAt: now,
     });
-    assert.equal(item.publisherAvatar, '/static/avatar1.png');
+    assert.equal(item.publisherAvatar, '');
 
     const order = serializeMallOrder({
       id: 'order-1',
@@ -416,8 +414,8 @@ test('task, forum, mall item and order serializers never return blank avatars', 
       createdAt: now,
       updatedAt: now,
     });
-    assert.equal(order.sellerAvatar, '/static/avatar1.png');
-    assert.equal(order.buyerAvatar, '/static/avatar1.png');
+    assert.equal(order.sellerAvatar, '');
+    assert.equal(order.buyerAvatar, '');
   });
 });
 

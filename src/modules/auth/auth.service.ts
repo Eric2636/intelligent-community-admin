@@ -176,6 +176,7 @@ export class AuthService {
   async wechatLogin(dto: WechatLoginDto) {
     const data = await this.code2Session(dto.code);
     const user = await upsertWechatLoginUser(prisma, data.openid, dto);
+    if (!user.enabled) throw new HttpError(403, '账号已被冻结，请联系管理员');
 
     const { token, expiresIn } = this.signToken(user);
 
@@ -227,6 +228,8 @@ export class AuthService {
             },
             select: userSelect,
           });
+
+    if (!user.enabled) throw new HttpError(403, '账号已被冻结，请联系管理员');
 
     const { token, expiresIn } = this.signToken(user);
     return {

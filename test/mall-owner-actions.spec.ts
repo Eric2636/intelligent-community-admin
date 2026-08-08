@@ -53,7 +53,6 @@ const row = {
   publisherId: 'owner-1',
   publisherName: '业主',
   publisherAvatar: null,
-  adminLabel: null,
   visibility: 'ONLINE',
   pinned: false,
   deletedAt: null,

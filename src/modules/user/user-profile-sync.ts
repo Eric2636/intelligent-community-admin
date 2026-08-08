@@ -148,11 +148,8 @@ export async function applyUserProfileSnapshotUpdate(
     sellerOrderData.sellerAvatar = profile.avatar;
     buyerOrderData.buyerAvatar = profile.avatar;
   }
-  if (identityChanged) {
-    taskPublisherData.publisherIdentity = profile.identityType;
-    forumPostData.authorIdentity = profile.identityType;
-    forumReplyData.authorIdentity = profile.identityType;
-  }
+  // Identity tags are resolved live from User/AdminUser at read time. Keep the
+  // historical columns untouched for compatibility; do not propagate snapshots.
 
   if (Object.keys(taskPublisherData).length) {
     await tx.task.updateMany({

@@ -22,6 +22,8 @@ function normalizeMethod(raw: unknown) {
 }
 
 export class ClientLogService {
+  constructor(private readonly db: typeof prisma = prisma) {}
+
   async reportMiniApiErrorLog(params: {
     userId?: string;
     openid?: string;
@@ -29,7 +31,7 @@ export class ClientLogService {
     dto: ReportMiniApiErrorLogDto;
   }) {
     const dto = params.dto;
-    const row = await prisma.miniProgramApiErrorLog.create({
+    const row = await this.db.miniProgramApiErrorLog.create({
       data: {
         userId: clip(params.userId, 191) || null,
         openid: clip(params.openid, 191) || null,
@@ -65,6 +67,14 @@ export class ClientLogService {
     const keyword = params.keyword?.trim();
     const method = params.method?.trim().toUpperCase();
 
+    const matchedUsers = keyword
+      ? await this.db.user.findMany({
+          where: { OR: [{ name: { contains: keyword } }, { phoneNumber: { contains: keyword } }] },
+          select: { id: true },
+          take: 100,
+        })
+      : [];
+    const matchedUserIds = matchedUsers.map((user) => user.id);
     const where: Prisma.MiniProgramApiErrorLogWhereInput = {
       ...(method ? { method } : {}),
       ...(Number.isInteger(params.statusCode) ? { statusCode: params.statusCode } : {}),
@@ -77,24 +87,31 @@ export class ClientLogService {
               { userId: { contains: keyword } },
               { openid: { contains: keyword } },
               { ip: { contains: keyword } },
+              ...(matchedUserIds.length ? [{ userId: { in: matchedUserIds } }] : []),
             ],
           }
         : {}),
     };
     const [total, rows] = await Promise.all([
-      prisma.miniProgramApiErrorLog.count({ where }),
-      prisma.miniProgramApiErrorLog.findMany({
+      this.db.miniProgramApiErrorLog.count({ where }),
+      this.db.miniProgramApiErrorLog.findMany({
         where,
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
     ]);
+    const userIds = [...new Set(rows.map((row) => row.userId).filter((id): id is string => Boolean(id)))];
+    const users = userIds.length
+      ? await this.db.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true, phoneNumber: true } })
+      : [];
+    const userNames = new Map(users.map((user) => [user.id, user.name || user.phoneNumber || '未命名用户']));
     return {
       total,
       list: rows.map((r) => ({
         ...r,
         createdAt: r.createdAt.toISOString(),
+        userName: r.userId ? userNames.get(r.userId) || '用户已删除' : '匿名用户',
       })),
     };
   }

@@ -13,6 +13,7 @@ import {
   MALL_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
+import { effectiveUserTag, resolveEffectiveUserTags } from '../user/user-identity';
 import { MallCategoryService } from './mall-category.service';
 import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
 import type { UpdateMallItemDto } from './mall.dto';
@@ -20,6 +21,14 @@ import { jsonImages, parsePriceNum, serializeMallItem } from './mall.serialize';
 
 export class MallItemService {
   private readonly categories = new MallCategoryService();
+
+  private async withCurrentUserTags<T extends { publisherId: string; userTagLabel?: string; userTagType?: string }>(items: T[]) {
+    const tags = await resolveEffectiveUserTags(prisma, items.map((item) => item.publisherId));
+    return items.map((item) => {
+      const tag = tags.get(item.publisherId) ?? effectiveUserTag(null);
+      return { ...item, userTagLabel: tag.label, userTagType: tag.type };
+    });
+  }
 
   async listItems(params: {
     userId?: string;
@@ -58,7 +67,7 @@ export class MallItemService {
       return list.map((r) => serializeMallItem(r));
     });
     if (!params.userId || base.length === 0) {
-      return base.map((item) => ({ ...item, isFavorited: false }));
+      return this.withCurrentUserTags(base.map((item) => ({ ...item, isFavorited: false })));
     }
 
     const favorites = await prisma.mallItemFavorite.findMany({
@@ -66,7 +75,7 @@ export class MallItemService {
       select: { itemId: true },
     });
     const favoriteItemIds = new Set(favorites.map((favorite) => favorite.itemId));
-    return base.map((item) => ({ ...item, isFavorited: favoriteItemIds.has(item.id) }));
+    return this.withCurrentUserTags(base.map((item) => ({ ...item, isFavorited: favoriteItemIds.has(item.id) })));
   }
 
   async getItemDetail(params: { userId?: string; itemId: string }) {
@@ -90,7 +99,7 @@ export class MallItemService {
         })
       : null;
 
-    return { ...base, isFavorited: Boolean(fav) };
+    return (await this.withCurrentUserTags([{ ...base, isFavorited: Boolean(fav) }]))[0];
   }
 
   async publishItem(params: {
@@ -152,7 +161,7 @@ export class MallItemService {
         },
       });
     });
-    const s = serializeMallItem(row);
+    const s = (await this.withCurrentUserTags([serializeMallItem(row)]))[0];
     await invalidateMallItemsListCache();
     return { ...s, id: row.id, _id: row.id };
   }
@@ -162,7 +171,7 @@ export class MallItemService {
       where: { publisherId: params.userId, ...contentNotDeleted },
       orderBy: { createdAt: 'desc' },
     });
-    return rows.map((r) => serializeMallItem(r));
+    return this.withCurrentUserTags(rows.map((r) => serializeMallItem(r)));
   }
 
   private async getOwnedItem(userIdRaw: string, itemIdRaw: string) {
@@ -221,7 +230,7 @@ export class MallItemService {
       invalidateMallItemsListCache(),
       invalidateMallItemDetailCache(current.id),
     ]);
-    return serializeMallItem(row);
+    return (await this.withCurrentUserTags([serializeMallItem(row)]))[0];
   }
 
   async setItemVisibility(params: {
@@ -240,7 +249,7 @@ export class MallItemService {
       invalidateMallItemsListCache(),
       invalidateMallItemDetailCache(current.id),
     ]);
-    return serializeMallItem(row);
+    return (await this.withCurrentUserTags([serializeMallItem(row)]))[0];
   }
 
   async deleteItem(params: { userId: string; itemId: string }) {

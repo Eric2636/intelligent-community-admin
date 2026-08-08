@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  contentIdentityTag,
+  effectiveUserTag,
   identityTypeLabel,
   normalizeIdentityType,
 } from '../src/modules/user/user-identity';
@@ -23,20 +23,20 @@ test('identityTypeLabel maps identity values to mini program labels', () => {
   assert.equal(identityTypeLabel(null), '');
 });
 
-test('contentIdentityTag prefers admin label over default identity label', () => {
-  assert.deepEqual(contentIdentityTag('OWNER', '网站管理员'), {
+test('effectiveUserTag uses current enabled admin binding before the default identity', () => {
+  assert.deepEqual(effectiveUserTag('OWNER', { role: 'ADMIN', orgName: '网站管理员', enabled: true }), {
     label: '网站管理员',
     type: 'admin',
   });
-  assert.deepEqual(contentIdentityTag('OWNER', ''), {
+  assert.deepEqual(effectiveUserTag('OWNER'), {
     label: '业主',
     type: 'owner',
   });
-  assert.deepEqual(contentIdentityTag('OUTSIDER', null), {
+  assert.deepEqual(effectiveUserTag('OUTSIDER', null), {
     label: '小区外人员',
     type: 'outsider',
   });
-  assert.deepEqual(contentIdentityTag(null, null), {
+  assert.deepEqual(effectiveUserTag(null, null), {
     label: '',
     type: '',
   });

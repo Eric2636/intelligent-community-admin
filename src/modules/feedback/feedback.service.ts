@@ -1,14 +1,14 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { avatarOrDefault } from '../user/default-avatar';
-import { identityTypeLabel } from '../user/user-identity';
+import { effectiveUserTag, resolveEffectiveUserTags } from '../user/user-identity';
 import {
   normalizeFeedback,
   type CreateFeedbackDto,
   type NormalizedAdminFeedbackQuery,
 } from './feedback.dto';
 
-type FeedbackDatabase = Pick<PrismaClient, 'feedback' | 'user'>;
+type FeedbackDatabase = Pick<PrismaClient, 'feedback' | 'user' | 'adminUser'>;
 
 export class FeedbackService {
   constructor(private readonly database: FeedbackDatabase = prisma) {}
@@ -86,6 +86,7 @@ export class FeedbackService {
         })
       : [];
     const profileById = new Map(profiles.map((profile) => [profile.id, profile]));
+    const tags = await resolveEffectiveUserTags(this.database, rows.map((row) => row.userId));
 
     return {
       total,
@@ -96,8 +97,8 @@ export class FeedbackService {
           userId: row.userId,
           nickname: profile?.name?.trim() || '微信用户',
           avatar: avatarOrDefault(profile?.avatar),
-          identity: profile?.identityType || '',
-          identityLabel: identityTypeLabel(profile?.identityType),
+          userTagLabel: (tags.get(row.userId) ?? effectiveUserTag(profile?.identityType)).label,
+          userTagType: (tags.get(row.userId) ?? effectiveUserTag(profile?.identityType)).type,
           content: row.content,
           createdAt: row.createdAt.toISOString(),
         };

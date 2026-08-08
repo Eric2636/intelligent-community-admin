@@ -2,8 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { HttpError } from '../../http-error';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
-import { adminDisplayLabelForContent } from '../admin/admin.service';
-import { contentIdentityTag } from './user-identity';
+import { resolveEffectiveUserTags } from './user-identity';
 import { runUserProfileUpdate, type UserProfileSnapshotChanges } from './user-profile-sync';
 import type { UpdateMeDto } from './user.dto';
 
@@ -18,42 +17,34 @@ export function editableProfileSnapshotChanges(dto: UpdateMeDto): UserProfileSna
 
 export class UserService {
   async getMe(userId: string) {
-    const [user, admin] = await Promise.all([
-      prisma.user.findUnique({
-        where: { id: userId },
-        select: {
-          id: true,
-          openid: true,
-          phoneNumber: true,
-          name: true,
-          avatar: true,
-          identityType: true,
-          gender: true,
-          householdNo: true,
-          birth: true,
-          address: true,
-          photos: true,
-          brief: true,
-          enabled: true,
-          disabledAt: true,
-          disabledReason: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      }),
-      prisma.adminUser.findFirst({
-        where: { boundUserId: userId, enabled: true },
-        select: { role: true, orgName: true },
-      }),
-    ]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        openid: true,
+        phoneNumber: true,
+        name: true,
+        avatar: true,
+        identityType: true,
+        gender: true,
+        householdNo: true,
+        birth: true,
+        address: true,
+        photos: true,
+        brief: true,
+        enabled: true,
+        disabledAt: true,
+        disabledReason: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
     if (!user) throw new HttpError(404, '用户不存在');
-    const adminLabel = admin ? adminDisplayLabelForContent(admin) : '';
-    const tag = contentIdentityTag(user.identityType, adminLabel);
+    const tag = (await resolveEffectiveUserTags(prisma, [userId])).get(userId) ?? { label: '', type: '' };
     return {
       ...user,
-      adminLabel,
-      contentTagLabel: tag.label,
-      contentTagType: tag.type,
+      userTagLabel: tag.label,
+      userTagType: tag.type,
     };
   }
 

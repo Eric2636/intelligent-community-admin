@@ -1,13 +1,18 @@
 # 发布入口
 
-后端 API 与后台管理系统的日常发布，使用本地一键直发脚本：
+后端 API 与后台管理系统共用同一套发布脚本，入口位于两个项目的父级目录：
 
 ```bash
-./deploy/deploy-test.sh
-./deploy/deploy-production.sh
+cd /Users/chenglingyun/Documents/fuye-project
+./deploy-test.sh
+./deploy-production.sh
 ```
 
-脚本会自动执行本地验证、源码同步、镜像构建、目标容器重建与健康检查；不需要手动 SSH、打包或运行 Docker 命令。测试入口固定 `test` 分支和 `ic-test-*` 容器，生产入口固定 `master` 分支和生产容器。详细步骤见仓库根目录 `docs/本地直发部署指南.md`。
+脚本会自动执行本地验证、源码同步、镜像构建、目标容器重建与健康检查；不需要手动 SSH、打包或运行 Docker 命令。测试入口固定 `test` 分支和 `ic-test-*` 容器，生产入口固定 `master` 分支和生产容器。
+
+发布时选择范围：`1` 仅后端、`2` 仅后台管理系统、`3` 两者同时发布；确认摘要后输入 `y` 才会真正发布。选择单个范围时，只检查对应项目的分支与未提交改动。
+
+`intelligent-community-admin/deploy/` 下的同名脚本仍可使用，但仅为兼容旧命令，会自动转发到父级入口；后续请优先使用父级入口。
 
 旧 Jenkins 与服务器侧 Git 拉取发布方式不再用于日常发版。
 

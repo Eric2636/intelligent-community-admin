@@ -49,4 +49,6 @@ test('发布脚本从本地同步，测试与生产容器严格隔离', () => {
   assert.match(productionEntry, /WEB_CONTAINER=ic-admin-web/);
   assert.match(productionEntry, /^API_PORT_ARGS=$/m);
   assert.match(release, /ADMIN_API_UPSTREAM=/);
+  assert.match(release, /docker stop '\$\{API_CONTAINER\}-previous'/);
+  assert.match(release, /docker stop '\$\{WEB_CONTAINER\}-previous'/);
 });

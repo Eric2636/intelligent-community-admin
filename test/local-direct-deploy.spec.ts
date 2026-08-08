@@ -31,6 +31,7 @@ test('发布入口只提供后端、后台或两者的选择，并默认可取�
   assert.match(release, /3\. 后端和后台管理系统/);
   assert.match(release, /0\. 取消/);
   assert.match(release, /read -r/);
+  assert.match(release, /ssh -n -o BatchMode=yes/);
 });
 
 test('发布脚本从本地同步，测试与生产容器严格隔离', () => {

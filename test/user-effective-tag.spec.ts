@@ -43,6 +43,15 @@ test('tag storage remains normalized and removes content tag snapshots', () => {
     assert.doesNotMatch(schema, new RegExp(`^\\s*${column}\\s+`, 'm'));
   }
   for (const column of ['publisherIdentity', 'authorIdentity', 'adminLabel']) {
-    assert.match(migration, new RegExp('DROP COLUMN `' + column + '`'));
+    assert.match(migration, new RegExp('DROP COLUMN(?: IF EXISTS)? `' + column + '`'));
   }
+});
+
+test('tag snapshot cleanup migration targets physical MySQL table names and can resume after interruption', () => {
+  assert.match(migration, /ALTER TABLE `forum_replies`\s+DROP COLUMN IF EXISTS `authorIdentity`/);
+  assert.doesNotMatch(migration, /ALTER TABLE `ForumReply`/);
+  for (const column of ['publisherIdentity', 'adminLabel']) {
+    assert.match(migration, new RegExp('DROP COLUMN IF EXISTS `' + column + '`'));
+  }
+  assert.match(migration, /DROP INDEX IF EXISTS `AdminUser_boundUserId_idx` ON `AdminUser`/);
 });

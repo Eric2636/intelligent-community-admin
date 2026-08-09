@@ -1,5 +1,5 @@
-import { Type } from 'class-transformer';
-import { IsArray, IsBoolean, IsDateString, IsIn, IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsArray, IsBoolean, IsDateString, IsIn, IsNumber, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class AdminLoginDto {
   @IsString()
@@ -200,6 +200,22 @@ export class AdminCreateContentDto {
   contact?: string;
 
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() || undefined : value))
+  @IsString()
+  @MaxLength(100)
+  wechatContact?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() || undefined : value))
+  @IsString()
+  @Matches(/^1[3-9]\d{9}$/, { message: '手机号格式不正确' })
+  phoneContact?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  phoneIsWechat?: boolean;
+
+  @IsOptional()
   @IsString()
   locationName?: string;
 
@@ -295,6 +311,22 @@ export class AdminUpdateContentDto {
   @IsOptional()
   @IsString()
   contact?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() || null : value))
+  @IsString()
+  @MaxLength(100)
+  wechatContact?: string | null;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() || null : value))
+  @IsString()
+  @Matches(/^1[3-9]\d{9}$/, { message: '手机号格式不正确' })
+  phoneContact?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  phoneIsWechat?: boolean;
 
   @IsOptional()
   @IsString()

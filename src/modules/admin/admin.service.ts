@@ -16,6 +16,13 @@ import {
 } from '../../lib/redis-cache';
 import { MallCategoryService } from '../mall/mall-category.service';
 import { MallCommentService } from '../mall/mall-comment.service';
+import {
+  assertMallItemHasContact,
+  normalizeLegacyContact,
+  normalizePhoneContact,
+  normalizePhoneIsWechat,
+  normalizeWechatContact,
+} from '../mall/mall-contact';
 import { jsonImages } from '../mall/mall.serialize';
 import { avatarOrDefault } from '../user/default-avatar';
 import { resolveEffectiveUserTags } from '../user/user-identity';
@@ -1341,6 +1348,11 @@ export class AdminService {
         if (normalizedMainImages.length + normalizedSubImages.length > 6) {
           throw new HttpError(400, '图片最多 6 张（主图+副图合计）');
         }
+        const wechatContact = normalizeWechatContact(dto.wechatContact);
+        const phoneContact = normalizePhoneContact(dto.phoneContact);
+        const phoneIsWechat = normalizePhoneIsWechat(dto.phoneIsWechat, phoneContact);
+        const legacyContact = normalizeLegacyContact(dto.contact);
+        assertMallItemHasContact({ wechatContact, phoneContact, legacyContact });
         const publisher = await tx.user.findUnique({
           where: { id: actorId },
           select: { name: true, avatar: true },
@@ -1352,7 +1364,10 @@ export class AdminService {
             price: dto.price?.trim() || null,
             unit: (dto.unit?.trim() || '元').slice(0, 16),
             desc,
-            contact: dto.contact?.trim() || null,
+            wechatContact,
+            phoneContact,
+            phoneIsWechat,
+            contact: wechatContact || phoneContact ? null : legacyContact,
             locationName: dto.locationName?.trim() || null,
             locationAddress: dto.locationAddress?.trim() || null,
             latitude: Number.isFinite(dto.latitude) ? dto.latitude : null,
@@ -1449,6 +1464,8 @@ export class AdminService {
       dto.price !== undefined ||
       dto.unit !== undefined ||
       dto.contact !== undefined ||
+      dto.wechatContact !== undefined ||
+      dto.phoneContact !== undefined ||
       dto.visibility !== undefined ||
       dto.pinned !== undefined ||
       dto.postType !== undefined ||
@@ -1530,7 +1547,26 @@ export class AdminService {
         if (dto.desc !== undefined) data.desc = dto.desc.trim();
         if (dto.price !== undefined) data.price = dto.price.trim() || null;
         if (dto.unit !== undefined) data.unit = (dto.unit.trim() || '元').slice(0, 16);
-        if (dto.contact !== undefined) data.contact = dto.contact.trim() || null;
+        const hasStructuredContactUpdate = dto.wechatContact !== undefined || dto.phoneContact !== undefined || dto.phoneIsWechat !== undefined;
+        if (hasStructuredContactUpdate) {
+          const wechatContact = dto.wechatContact === undefined
+            ? existing.wechatContact
+            : normalizeWechatContact(dto.wechatContact);
+          const phoneContact = dto.phoneContact === undefined
+            ? existing.phoneContact
+            : normalizePhoneContact(dto.phoneContact);
+          const phoneIsWechat = normalizePhoneIsWechat(
+            dto.phoneIsWechat === undefined ? existing.phoneIsWechat : dto.phoneIsWechat,
+            phoneContact,
+          );
+          const legacyContact = normalizeLegacyContact(existing.contact);
+          assertMallItemHasContact({ wechatContact, phoneContact, legacyContact });
+          data.wechatContact = wechatContact;
+          data.phoneContact = phoneContact;
+          data.phoneIsWechat = phoneIsWechat;
+          if (wechatContact || phoneContact) data.contact = null;
+        }
+        if (dto.contact !== undefined && !hasStructuredContactUpdate) data.contact = normalizeLegacyContact(dto.contact);
         if (dto.locationName !== undefined) data.locationName = dto.locationName.trim() || null;
         if (dto.locationAddress !== undefined) data.locationAddress = dto.locationAddress.trim() || null;
         if (dto.latitude !== undefined) data.latitude = Number.isFinite(dto.latitude) ? dto.latitude : null;

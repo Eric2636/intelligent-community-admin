@@ -466,6 +466,10 @@ model MallItem {
   price            String?
   unit             String            @default("元")
   desc             String            @db.Text
+  wechatContact    String?           @db.VarChar(100)
+  phoneContact     String?           @db.VarChar(32)
+  phoneIsWechat    Boolean           @default(false)
+  /// 历史自由文本联系方式，仅用于兼容旧商品
   contact          String?
   locationName     String?
   locationAddress  String?           @db.Text

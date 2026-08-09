@@ -18,6 +18,13 @@ import { MallCategoryService } from './mall-category.service';
 import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
 import type { UpdateMallItemDto } from './mall.dto';
 import { jsonImages, parsePriceNum, serializeMallItem } from './mall.serialize';
+import {
+  assertMallItemHasContact,
+  normalizeLegacyContact,
+  normalizePhoneContact,
+  normalizePhoneIsWechat,
+  normalizeWechatContact,
+} from './mall-contact';
 
 export class MallItemService {
   private readonly categories = new MallCategoryService();
@@ -109,6 +116,9 @@ export class MallItemService {
     price?: string;
     unit?: string;
     desc?: string;
+    wechatContact?: string;
+    phoneContact?: string;
+    phoneIsWechat?: boolean;
     contact?: string;
     locationName?: string;
     locationAddress?: string;
@@ -132,6 +142,11 @@ export class MallItemService {
     if (imgTotal > 6) throw new HttpError(400, '图片最多上传 6 张（主图+副图合计）');
 
     const categoryId = await this.categories.assertEnabledCategoryId(params.categoryId);
+    const wechatContact = normalizeWechatContact(params.wechatContact);
+    const phoneContact = normalizePhoneContact(params.phoneContact);
+    const phoneIsWechat = normalizePhoneIsWechat(params.phoneIsWechat, phoneContact);
+    const legacyContact = normalizeLegacyContact(params.contact);
+    assertMallItemHasContact({ wechatContact, phoneContact, legacyContact });
     const row = await prisma.$transaction(async (tx) => {
       await lockUsersForProfileSnapshot(tx, [params.userId]);
       const publisher = await tx.user.findUnique({
@@ -145,7 +160,10 @@ export class MallItemService {
           price: params.price?.trim() || null,
           unit: (params.unit?.trim() || '元').slice(0, 16),
           desc: params.desc?.trim() || '',
-          contact: params.contact?.trim() || null,
+          wechatContact,
+          phoneContact,
+          phoneIsWechat,
+          contact: wechatContact || phoneContact ? null : legacyContact,
           locationName: params.locationName?.trim() || null,
           locationAddress: params.locationAddress?.trim() || null,
           latitude: Number.isFinite(params.latitude) ? params.latitude : null,
@@ -202,7 +220,26 @@ export class MallItemService {
     if (dto.price !== undefined) data.price = dto.price?.trim() || null;
     if (dto.unit !== undefined) data.unit = (dto.unit.trim() || '元').slice(0, 16);
     if (dto.desc !== undefined) data.desc = dto.desc.trim();
-    if (dto.contact !== undefined) data.contact = dto.contact?.trim() || null;
+    const hasStructuredContactUpdate = dto.wechatContact !== undefined || dto.phoneContact !== undefined || dto.phoneIsWechat !== undefined;
+    if (hasStructuredContactUpdate) {
+      const wechatContact = dto.wechatContact === undefined
+        ? current.wechatContact
+        : normalizeWechatContact(dto.wechatContact);
+      const phoneContact = dto.phoneContact === undefined
+        ? current.phoneContact
+        : normalizePhoneContact(dto.phoneContact);
+      const phoneIsWechat = normalizePhoneIsWechat(
+        dto.phoneIsWechat === undefined ? current.phoneIsWechat : dto.phoneIsWechat,
+        phoneContact,
+      );
+      const legacyContact = normalizeLegacyContact(current.contact);
+      assertMallItemHasContact({ wechatContact, phoneContact, legacyContact });
+      data.wechatContact = wechatContact;
+      data.phoneContact = phoneContact;
+      data.phoneIsWechat = phoneIsWechat;
+      if (wechatContact || phoneContact) data.contact = null;
+    }
+    if (dto.contact !== undefined && !hasStructuredContactUpdate) data.contact = normalizeLegacyContact(dto.contact);
     if (dto.locationName !== undefined) data.locationName = dto.locationName?.trim() || null;
     if (dto.locationAddress !== undefined) data.locationAddress = dto.locationAddress?.trim() || null;
     if (dto.latitude !== undefined) data.latitude = Number.isFinite(dto.latitude) ? dto.latitude : null;

@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { avatarOrDefault } from '../user/default-avatar';
+import { serializeMallContacts } from './mall-contact';
 
 export function jsonImages(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
@@ -18,6 +19,9 @@ export function serializeMallItem(
     price: string | null;
     unit: string;
     desc: string;
+    wechatContact?: string | null;
+    phoneContact?: string | null;
+    phoneIsWechat?: boolean;
     contact: string | null;
     locationName?: string | null;
     locationAddress?: string | null;
@@ -63,7 +67,11 @@ export function serializeMallItem(
     price: row.price ?? '',
     unit: row.unit,
     desc: row.desc,
+    wechatContact: row.wechatContact ?? '',
+    phoneContact: row.phoneContact ?? '',
+    phoneIsWechat: Boolean(row.phoneIsWechat),
     contact: row.contact ?? '',
+    contacts: serializeMallContacts(row),
     locationName: row.locationName ?? '',
     locationAddress: row.locationAddress ?? '',
     latitude: row.latitude ?? null,

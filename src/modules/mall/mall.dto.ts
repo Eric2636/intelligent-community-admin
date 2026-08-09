@@ -2,6 +2,7 @@ import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsIn,
   IsNotEmpty,
   IsNumber,
@@ -56,6 +57,22 @@ export class PublishMallItemDto {
   @IsString()
   @MaxLength(500)
   contact?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() || undefined : value))
+  @IsString()
+  @MaxLength(100)
+  wechatContact?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() || undefined : value))
+  @IsString()
+  @Matches(/^1[3-9]\d{9}$/, { message: '手机号格式不正确' })
+  phoneContact?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  phoneIsWechat?: boolean;
 
   @IsOptional()
   @IsString()
@@ -135,6 +152,22 @@ export class UpdateMallItemDto {
   @IsString()
   @MaxLength(500)
   contact?: string | null;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() || null : value))
+  @IsString()
+  @MaxLength(100)
+  wechatContact?: string | null;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() || null : value))
+  @IsString()
+  @Matches(/^1[3-9]\d{9}$/, { message: '手机号格式不正确' })
+  phoneContact?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  phoneIsWechat?: boolean;
 
   @IsOptional()
   @IsString()

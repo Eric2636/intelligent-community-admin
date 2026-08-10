@@ -25,7 +25,7 @@
 - `state`：`PENDING`（待关联）、`ATTACHED`（已关联）、`DELETE_PENDING`（待删除）、`DELETED`（已删除）、`DELETE_FAILED`（删除失败）；
 - `createdAt`、`attachedAt`、`deleteRequestedAt`、`deletedAt`、`deleteAttempts`、`lastDeleteError`。
 
-`objectKey` 与 `url` 均唯一，确保同一 COS 对象不会被重复删除。只接受当前环境 COS 前缀下、由本服务记录的对象，避免对静态文件或其他环境对象做删除操作。
+`objectKey` 为唯一键，`url` 保留为可展示的长文本；这样既能唯一标识同一 COS 对象，也不会因 MySQL 的 UTF-8 索引长度限制而无法迁移。只接受当前环境 COS 前缀下、由本服务记录的对象，避免对静态文件或其他环境对象做删除操作。
 
 ## 数据流
 
@@ -60,6 +60,8 @@
 ## 历史生产孤儿媒体
 
 本次生产库已经清除测试数据，保留的清理前备份可作为一次性历史清理清单来源。实施后提供仅供运维执行的脚本：从该备份提取媒体 URL，去重、校验生产前缀后删除，并逐项输出成功、跳过和失败结果。该脚本不扫描或删除默认资源。
+
+先在生产环境以 `npm run cleanup-legacy-media -- --backup <备份路径> --env production` 执行 dry-run；只有核对数量无误且获得明确授权后，才追加 `--confirm` 实际删除。
 
 ## 审计与可观测性
 

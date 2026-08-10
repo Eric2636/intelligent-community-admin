@@ -1,6 +1,6 @@
 CREATE TABLE `media_assets` (
     `id` VARCHAR(191) NOT NULL,
-    `objectKey` VARCHAR(1024) NOT NULL,
+    `objectKey` VARCHAR(512) NOT NULL,
     `url` TEXT NOT NULL,
     `uploaderId` VARCHAR(191) NOT NULL,
     `module` VARCHAR(32) NOT NULL,

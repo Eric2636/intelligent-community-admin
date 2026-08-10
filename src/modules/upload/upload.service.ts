@@ -175,18 +175,25 @@ export class UploadService {
     });
 
     const url = publicObjectUrl(bucket, region, key);
-    await new MediaAssetService({
-      database: prisma,
-      bucket,
-      region,
-      envPrefix: this.getEnvPrefix(),
-    }).registerUploaded({
-      userId: params.userId,
-      module: scope.module,
-      type: scope.type,
-      key,
-      url,
-    });
+    try {
+      await new MediaAssetService({
+        database: prisma,
+        bucket,
+        region,
+        envPrefix: this.getEnvPrefix(),
+      }).registerUploaded({
+        userId: params.userId,
+        module: scope.module,
+        type: scope.type,
+        key,
+        url,
+      });
+    } catch (error) {
+      await new Promise<void>((resolve) => {
+        cos.deleteObject({ Bucket: bucket, Region: region, Key: key }, () => resolve());
+      });
+      throw new HttpError(500, `媒体上传登记失败：${error instanceof Error ? error.message : '未知错误'}`);
+    }
 
     return { url, key, bucket, region };
   }

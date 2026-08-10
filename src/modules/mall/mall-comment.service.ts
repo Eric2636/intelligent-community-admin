@@ -5,6 +5,7 @@ import { parseStrictMediaUrlList } from '../../lib/media-url';
 import { prisma } from '../../lib/prisma';
 import { avatarOrDefault } from '../user/default-avatar';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
+import { configuredMediaAssetService } from '../media/media-asset.service';
 
 const COMMENT_LIST_CAP = 300;
 const MAX_COMMENT_IMAGES = 3;
@@ -158,7 +159,7 @@ export class MallCommentService {
         where: { id: params.userId },
         select: { name: true, avatar: true },
       });
-      return tx.mallItemComment.create({
+      const created = await tx.mallItemComment.create({
         data: {
           itemId,
           userId: params.userId,
@@ -171,6 +172,9 @@ export class MallCommentService {
           images: imageUrls.length ? (imageUrls as unknown as Prisma.InputJsonValue) : undefined,
         },
       });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: params.userId, urls: imageUrls });
+      return created;
     });
 
     return { commentId: row.id };
@@ -182,13 +186,14 @@ export class MallCommentService {
     if (!itemId) throw new HttpError(400, '缺少 itemId');
     if (!commentId) throw new HttpError(400, '缺少 commentId');
 
-    const row = await prisma.mallItemComment.findUnique({
-      where: { id: commentId },
+    await prisma.$transaction(async (tx) => {
+      const row = await tx.mallItemComment.findUnique({ where: { id: commentId } });
+      if (!row || row.itemId !== itemId) throw new HttpError(404, '评论不存在');
+      if (row.userId !== params.userId) throw new HttpError(403, '无权限删除该评论');
+      await tx.mallItemComment.delete({ where: { id: commentId } });
+      const media = configuredMediaAssetService(tx);
+      await media?.requestDeleteUrls(tx, parseImages(row.images));
     });
-    if (!row || row.itemId !== itemId) throw new HttpError(404, '评论不存在');
-    if (row.userId !== params.userId) throw new HttpError(403, '无权限删除该评论');
-
-    await prisma.mallItemComment.delete({ where: { id: commentId } });
     return {};
   }
 

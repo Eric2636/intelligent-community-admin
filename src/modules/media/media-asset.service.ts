@@ -200,3 +200,18 @@ export class MediaAssetService {
     }
   }
 }
+
+/**
+ * 业务事务中按当前 COS 环境启用媒体关联；未配置 COS 的离线单测不介入旧媒体数据。
+ */
+export function configuredMediaAssetService(database: MediaAssetDatabase) {
+  const bucket = String(process.env.COS_BUCKET || '').trim();
+  const region = String(process.env.COS_REGION || '').trim();
+  if (!bucket || !region) return null;
+  return new MediaAssetService({
+    database,
+    bucket,
+    region,
+    envPrefix: String(process.env.COS_ENV_PREFIX || 'test'),
+  });
+}

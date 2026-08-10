@@ -27,8 +27,8 @@
 
 - [ ] 先写失败测试：同一 `objectKey` 重复登记只保留一条 `PENDING` 资产；其他用户不能关联 URL；未知 URL 不进入删除队列。
 - [ ] 运行 `npx tsx --test test/media-asset.service.spec.ts`，确认因服务不存在失败。
-- [ ] 新增 `MediaAsset`，字段包括对象键、URL、上传者、模块、图片/视频类型、状态、关联/删除时间、删除次数和错误信息；对象键与 URL 唯一，索引为 `(state, createdAt)`、`(state, deleteRequestedAt)`。
-- [ ] 实现 `registerUploaded`、`attachUrls(tx, { uploaderId, urls })`、`requestDeleteUrls(tx, urls)`。关联仅接受当前上传者的 `PENDING` URL，删除只操作已登记资产。
+- [x] 新增 `MediaAsset`，字段包括对象键、URL、上传者、模块、图片/视频类型、状态、关联/删除时间、删除次数和错误信息；对象键为唯一键（URL 为非唯一长文本），索引为 `(state, createdAt)`、`(state, deleteRequestedAt)`。
+- [x] 实现 `registerUploaded`、`attachUrls(tx, { uploaderId, urls })`、`requestDeleteUrls(tx, urls)`。关联仅接受当前上传者的 `PENDING` URL，删除只操作已登记资产。
 - [ ] 运行 `npm run prisma:generate && npx tsx --test test/media-asset.service.spec.ts`，预期 PASS。
 - [ ] 提交模型与服务：`feat(media): add media asset lifecycle model`。
 
@@ -38,8 +38,8 @@
 
 - [ ] 先写失败测试：上传返回 URL 时登记 `PENDING`；超过 24 小时的待关联资产可删除；`ATTACHED` 不被临时清理；当前环境以外、未知模块或 COS 删除失败的资产不会误删。
 - [ ] 运行 `npx tsx --test test/media-asset.service.spec.ts test/upload-media-asset.spec.ts`，确认当前实现失败。
-- [ ] `UploadService.uploadMedia` 在 COS `putObject` 成功后登记资产；登记失败立即以相同对象键补偿 `deleteObject` 并返回上传失败。
-- [ ] `deleteAsset` 仅接受 `COS_ENV_PREFIX/(forum|task|mall|avatar)/(img|vid)/` 的已登记对象。成功置 `DELETED`；异常置 `DELETE_FAILED`、记录错误并递增次数，不向用户请求抛出 COS 异常。
+- [x] `UploadService.uploadMedia` 在 COS `putObject` 成功后登记资产；登记失败立即以相同对象键补偿 `deleteObject` 并返回上传失败。
+- [x] `deleteAsset` 仅接受 `COS_ENV_PREFIX/(forum|task|mall|avatar)/(img|vid)/` 的已登记对象。成功置 `DELETED`；异常置 `DELETE_FAILED`、记录错误并递增次数，不向用户请求抛出 COS 异常。
 - [ ] 运行同一测试命令，预期 PASS。
 - [ ] 提交：`feat(media): register and safely delete COS assets`。
 

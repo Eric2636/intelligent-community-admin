@@ -28,6 +28,7 @@ import { avatarOrDefault } from '../user/default-avatar';
 import { resolveEffectiveUserTags } from '../user/user-identity';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { runAdminContentMutation } from './admin-content-mutation';
+import { configuredMediaAssetService } from '../media/media-asset.service';
 import {
   createCaptcha,
   getIpLockUntil,
@@ -122,6 +123,10 @@ function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
 }
 
+function mediaUrls(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((url): url is string => typeof url === 'string') : [];
+}
+
 function parseForumPostType(raw: string | undefined): 'NORMAL' | 'ANNOUNCEMENT' {
   const value = String(raw || 'NORMAL').trim();
   return FORUM_POST_TYPE_SET.has(value) ? (value as 'NORMAL' | 'ANNOUNCEMENT') : 'NORMAL';
@@ -167,6 +172,15 @@ export async function updateAdminTaskContentCas(
 }
 
 export class AdminService {
+  async resolveUploadOwnerId(operator: AdminOperator) {
+    const admin = await prisma.adminUser.findUnique({
+      where: { id: operator.adminId },
+      select: { enabled: true, boundUserId: true },
+    });
+    if (!admin?.enabled) throw new HttpError(403, '管理员账号不可用，无法上传媒体');
+    return admin.boundUserId?.trim() || operator.adminId;
+  }
+
   private readonly mallComments = new MallCommentService();
   private readonly mallCategories = new MallCategoryService();
 
@@ -1289,6 +1303,7 @@ export class AdminService {
   ) {
     const postType = type === 'posts' ? parseForumPostType(dto.postType) : 'NORMAL';
     const actorId = postType === 'ANNOUNCEMENT' ? '' : await this.resolveActorUserIdForAdmin(dto.actorUserId, operator);
+    const mediaUploaderId = await this.resolveUploadOwnerId(operator);
     const vis = dto.visibility ?? 'ONLINE';
     const pin = dto.pinned ?? false;
     return runAdminContentMutation(prisma, async (tx) => {
@@ -1323,6 +1338,8 @@ export class AdminService {
             pinned: pin,
           },
         });
+        const media = configuredMediaAssetService(tx);
+        await media?.attachUrls(tx, { uploaderId: mediaUploaderId, urls: [...images, ...videos] });
         return {
           result: {
             ...row,
@@ -1384,6 +1401,11 @@ export class AdminService {
             pinned: pin,
           },
         });
+        const media = configuredMediaAssetService(tx);
+        await media?.attachUrls(tx, {
+          uploaderId: mediaUploaderId,
+          urls: [...normalizedMainImages, ...normalizedSubImages, ...videos],
+        });
         return {
           result: {
             ...row,
@@ -1428,6 +1450,8 @@ export class AdminService {
           pinned: pin,
         },
       });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: mediaUploaderId, urls: [...images, ...videos] });
       return {
         result: {
           ...row,
@@ -1479,6 +1503,7 @@ export class AdminService {
 
     await this.assertNonSuperCannotTransferPublisher(operator, dto.actorUserId);
     const actorId = dto.actorUserId !== undefined ? await this.resolveActorUserId(dto.actorUserId) : null;
+    const mediaUploaderId = await this.resolveUploadOwnerId(operator);
 
     return runAdminContentMutation(prisma, async (tx) => {
       if (actorId) await lockUsersForProfileSnapshot(tx, [actorId]);
@@ -1522,6 +1547,14 @@ export class AdminService {
           data.authorAvatar = author?.avatar ?? null;
         }
         const row = await tx.forumPost.update({ where: { id }, data });
+        const media = configuredMediaAssetService(tx);
+        const previousUrls = [...mediaUrls(existing.images), ...mediaUrls(existing.videos)];
+        const nextUrls = [
+          ...(dto.images === undefined ? mediaUrls(existing.images) : parseStrictMediaUrlList(dto.images, MAX_POST_IMAGES, 'image', 'images')),
+          ...(dto.videos === undefined ? mediaUrls(existing.videos) : parseStrictMediaUrlList(dto.videos, MAX_POST_VIDEOS, 'video', 'videos')),
+        ];
+        await media?.attachUrls(tx, { uploaderId: mediaUploaderId, urls: nextUrls });
+        await media?.requestDeleteUrls(tx, previousUrls.filter((url) => !nextUrls.includes(url)));
         return {
           result: {
             ...row,
@@ -1625,6 +1658,13 @@ export class AdminService {
           data.videos = videos.length ? jsonImages(videos) : [];
         }
         const row = await tx.mallItem.update({ where: { id }, data });
+        const media = configuredMediaAssetService(tx);
+        const previousUrls = [
+          ...mediaUrls(existing.mainImages), ...mediaUrls(existing.subImages), ...mediaUrls(existing.videos),
+        ];
+        const nextUrls = [...mediaUrls(row.mainImages), ...mediaUrls(row.subImages), ...mediaUrls(row.videos)];
+        await media?.attachUrls(tx, { uploaderId: mediaUploaderId, urls: nextUrls });
+        await media?.requestDeleteUrls(tx, previousUrls.filter((url) => !nextUrls.includes(url)));
         return {
           result: {
             ...row,
@@ -1672,6 +1712,11 @@ export class AdminService {
         version: existing.version,
         data,
       });
+      const media = configuredMediaAssetService(tx);
+      const previousUrls = [...mediaUrls(existing.images), ...mediaUrls(existing.videos)];
+      const nextUrls = [...mediaUrls(row.images), ...mediaUrls(row.videos)];
+      await media?.attachUrls(tx, { uploaderId: mediaUploaderId, urls: nextUrls });
+      await media?.requestDeleteUrls(tx, previousUrls.filter((url) => !nextUrls.includes(url)));
       return {
         result: {
           ...row,
@@ -1691,36 +1736,49 @@ export class AdminService {
     const now = new Date();
 
     if (type === 'posts') {
-      const row = await prisma.forumPost.findFirst({
-        where: { id, ...contentNotDeleted },
-      });
-      if (!row) throw new HttpError(404, '内容不存在');
-      await this.assertCanModifyContent(operator, type, row.authorId);
-      await prisma.forumPost.update({
-        where: { id },
-        data: { deletedAt: now },
+      await prisma.$transaction(async (tx) => {
+        const row = await tx.forumPost.findFirst({ where: { id, ...contentNotDeleted } });
+        if (!row) throw new HttpError(404, '内容不存在');
+        await this.assertCanModifyContent(operator, type, row.authorId);
+        const replies = await tx.forumReply.findMany({ where: { postId: id }, select: { images: true, videos: true } });
+        await tx.forumPost.update({ where: { id }, data: { deletedAt: now } });
+        const media = configuredMediaAssetService(tx);
+        await media?.requestDeleteUrls(tx, [
+          ...mediaUrls(row.images), ...mediaUrls(row.videos),
+          ...replies.flatMap((reply) => [...mediaUrls(reply.images), ...mediaUrls(reply.videos)]),
+        ]);
       });
       await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
       return { id };
     }
 
     if (type === 'items') {
-      const row = await prisma.mallItem.findFirst({
-        where: { id, ...contentNotDeleted },
+      await prisma.$transaction(async (tx) => {
+        const row = await tx.mallItem.findFirst({ where: { id, ...contentNotDeleted } });
+        if (!row) throw new HttpError(404, '内容不存在');
+        await this.assertCanModifyContent(operator, type, row.publisherId);
+        const comments = await tx.mallItemComment.findMany({ where: { itemId: id }, select: { images: true } });
+        await tx.mallItem.update({ where: { id }, data: { deletedAt: now } });
+        const media = configuredMediaAssetService(tx);
+        await media?.requestDeleteUrls(tx, [
+          ...mediaUrls(row.mainImages), ...mediaUrls(row.subImages), ...mediaUrls(row.videos),
+          ...comments.flatMap((comment) => mediaUrls(comment.images)),
+        ]);
       });
-      if (!row) throw new HttpError(404, '内容不存在');
-      await this.assertCanModifyContent(operator, type, row.publisherId);
-      await prisma.mallItem.update({ where: { id }, data: { deletedAt: now } });
       await Promise.all([invalidateMallItemsListCache(), invalidateMallItemDetailCache(id)]);
       return { id };
     }
 
-    const row = await prisma.task.findFirst({
-      where: { id, ...contentNotDeleted },
+    await prisma.$transaction(async (tx) => {
+      const row = await tx.task.findFirst({ where: { id, ...contentNotDeleted } });
+      if (!row) throw new HttpError(404, '内容不存在');
+      await this.assertCanModifyContent(operator, type, row.publisherId);
+      await tx.task.update({ where: { id }, data: { deletedAt: now } });
+      const media = configuredMediaAssetService(tx);
+      await media?.requestDeleteUrls(tx, [
+        ...mediaUrls(row.images), ...mediaUrls(row.videos), ...mediaUrls(row.proofImages),
+      ]);
     });
-    if (!row) throw new HttpError(404, '内容不存在');
-    await this.assertCanModifyContent(operator, type, row.publisherId);
-    await prisma.task.update({ where: { id }, data: { deletedAt: now } });
     await invalidatePendingTasksListCache();
     return { id };
   }

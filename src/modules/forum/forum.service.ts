@@ -14,6 +14,7 @@ import {
 } from '../../lib/redis-cache';
 import { notify } from '../notification/notification-notify';
 import { sanitizeNotificationText } from '../notification/notification-text';
+import { configuredMediaAssetService } from '../media/media-asset.service';
 import { avatarOrDefault } from '../user/default-avatar';
 import { effectiveUserTag, resolveEffectiveUserTags, type EffectiveUserTag } from '../user/user-identity';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
@@ -27,6 +28,10 @@ const ADMIN_ANNOUNCEMENT_AUTHOR_ID = '__admin_announcement__';
 
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
+}
+
+function mediaUrls(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((url): url is string => typeof url === 'string') : [];
 }
 
 type ForumDatabase = Pick<PrismaClient, '$transaction' | 'user' | 'adminUser'>;
@@ -235,15 +240,26 @@ export class ForumService {
     const id = String(params.postId || '').trim();
     if (!id) throw new HttpError(400, 'postId 不能为空');
 
-    const post = await prisma.forumPost.findFirst({
-      where: { id, visibility: 'ONLINE', ...contentNotDeleted },
-    });
-    if (!post) throw new HttpError(404, '帖子不存在');
-    if (post.authorId !== params.userId) throw new HttpError(403, '仅能删除自己的帖子');
-
-    await prisma.forumPost.update({
-      where: { id },
-      data: { deletedAt: new Date() },
+    await prisma.$transaction(async (tx) => {
+      const post = await tx.forumPost.findFirst({
+        where: { id, visibility: 'ONLINE', ...contentNotDeleted },
+      });
+      if (!post) throw new HttpError(404, '帖子不存在');
+      if (post.authorId !== params.userId) throw new HttpError(403, '仅能删除自己的帖子');
+      const replies = await tx.forumReply.findMany({ where: { postId: id }, select: { images: true, videos: true } });
+      await tx.forumPost.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+      });
+      const media = configuredMediaAssetService(tx);
+      await media?.requestDeleteUrls(tx, [
+        ...mediaUrls(post.images),
+        ...mediaUrls(post.videos),
+        ...replies.flatMap((reply) => [
+          ...mediaUrls(reply.images),
+          ...mediaUrls(reply.videos),
+        ]),
+      ]);
     });
     await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
     return {};
@@ -261,6 +277,11 @@ export class ForumService {
       if (reply.authorId !== params.userId) throw new HttpError(403, '仅能删除自己的回复');
 
       await tx.forumReply.delete({ where: { id: replyId } });
+      const media = configuredMediaAssetService(tx);
+      await media?.requestDeleteUrls(tx, [
+        ...mediaUrls(reply.images),
+        ...mediaUrls(reply.videos),
+      ]);
       const cnt = await tx.forumReply.count({ where: { postId } });
       await tx.forumPost.update({
         where: { id: postId },
@@ -288,7 +309,7 @@ export class ForumService {
         where: { id: params.userId },
         select: { name: true, avatar: true },
       });
-      return tx.forumPost.create({
+      const row = await tx.forumPost.create({
         data: {
           title,
           content,
@@ -299,6 +320,9 @@ export class ForumService {
           authorAvatar: author?.avatar ?? null,
         },
       });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: params.userId, urls: [...images, ...videos] });
+      return row;
     });
     await invalidateForumPostListCache();
     const tags = await resolveEffectiveUserTags(this.database, [params.userId]);
@@ -378,6 +402,8 @@ export class ForumService {
           videos: jsonMedia(videos),
         },
       });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: params.userId, urls: [...images, ...videos] });
       await tx.forumPost.update({
         where: { id },
         data: { replyCount: { increment: 1 } },

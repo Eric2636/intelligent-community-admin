@@ -10,6 +10,7 @@ import {
 } from '../user/user-profile-sync';
 import { wechatAccessTokenService } from '../wechat/wechat-access-token';
 import { WechatContentSecurityClient } from '../wechat/wechat-content-security';
+import { configuredMediaAssetService } from '../media/media-asset.service';
 
 type AvatarReviewDatabase = Pick<PrismaClient, 'avatarReview' | '$transaction'>;
 type ReviewTransaction = Prisma.TransactionClient;
@@ -71,6 +72,15 @@ export class AvatarReviewService {
         });
         return { id: superseded.id, status: superseded.status };
       }
+      const reviewRepository = tx.avatarReview as typeof tx.avatarReview & {
+        findMany?: (args: unknown) => Promise<Array<{ mediaUrl: string }>>;
+      };
+      const supersededReviews = reviewRepository.findMany
+        ? await reviewRepository.findMany({
+            where: { userId: params.userId, id: { not: review.id }, status: { in: ['SUBMITTING', 'PENDING'] } },
+            select: { mediaUrl: true },
+          })
+        : [];
       await tx.avatarReview.updateMany({
         where: { userId: params.userId, id: { not: review.id }, status: { in: ['SUBMITTING', 'PENDING'] } },
         data: { status: 'SUPERSEDED', completedAt: new Date() },
@@ -79,6 +89,9 @@ export class AvatarReviewService {
         where: { id: review.id },
         data: { traceId, status: 'PENDING' },
       });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: params.userId, urls: [params.mediaUrl] });
+      await media?.requestDeleteUrls(tx, supersededReviews.map((previous) => previous.mediaUrl));
       return { id: pending.id, status: pending.status };
     });
   }
@@ -114,16 +127,24 @@ export class AvatarReviewService {
     if (!review) return { handled: false, status: 'NOT_FOUND' };
     if (review.status !== 'PENDING') return { handled: true, status: review.status };
     if (params.errcode !== 0) {
-      await this.database.avatarReview.update({
-        where: { id: review.id },
-        data: { status: 'FAILED', wechatErrcode: params.errcode, completedAt: new Date() },
+      await this.database.$transaction(async (tx) => {
+        await tx.avatarReview.update({
+          where: { id: review.id },
+          data: { status: 'FAILED', wechatErrcode: params.errcode, completedAt: new Date() },
+        });
+        const media = configuredMediaAssetService(tx);
+        await media?.requestDeleteUrls(tx, [review.mediaUrl]);
       });
       return { handled: true, status: 'FAILED' };
     }
     if (params.suggest !== 'pass') {
-      await this.database.avatarReview.update({
-        where: { id: review.id },
-        data: { status: 'REJECTED', suggest: params.suggest || null, label: params.label, wechatErrcode: 0, completedAt: new Date() },
+      await this.database.$transaction(async (tx) => {
+        await tx.avatarReview.update({
+          where: { id: review.id },
+          data: { status: 'REJECTED', suggest: params.suggest || null, label: params.label, wechatErrcode: 0, completedAt: new Date() },
+        });
+        const media = configuredMediaAssetService(tx);
+        await media?.requestDeleteUrls(tx, [review.mediaUrl]);
       });
       return { handled: true, status: 'REJECTED' };
     }
@@ -143,6 +164,9 @@ export class AvatarReviewService {
         });
         return { status: 'SUPERSEDED' as const };
       }
+      const previousAvatar = tx.user
+        ? await tx.user.findUnique({ where: { id: current.userId }, select: { avatar: true } })
+        : null;
       const cacheTargets = await this.applyAvatar({
         tx,
         userId: current.userId,
@@ -152,6 +176,10 @@ export class AvatarReviewService {
         where: { id: current.id },
         data: { status: 'PASSED', suggest: 'pass', label: params.label, wechatErrcode: 0, completedAt: new Date() },
       });
+      const media = configuredMediaAssetService(tx);
+      if (previousAvatar?.avatar && previousAvatar.avatar !== current.mediaUrl) {
+        await media?.requestDeleteUrls(tx, [previousAvatar.avatar]);
+      }
       return { status: 'PASSED' as const, cacheTargets };
     });
     if (outcome.cacheTargets) await this.invalidateAvatarCaches(outcome.cacheTargets);

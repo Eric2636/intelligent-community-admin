@@ -438,10 +438,11 @@ export function registerAdminRoutes(
 
   router.post('/api/admin/upload/cos/credentials', adminAuth, async (ctx) => {
     const dto = await parseDto(CosCredentialsDto, jsonBody(ctx));
+    const userId = await adminService.resolveUploadOwnerId(ctx.state.admin);
     ctx.body = {
       code: 200,
       data: await uploadService.getStsCredentials({
-        userId: ctx.state.admin.adminId,
+        userId,
         module: dto.module,
         type: dto.type,
       }),
@@ -458,10 +459,11 @@ export function registerAdminRoutes(
       ctx.body = { statusCode: 400, message: '缺少上传文件' };
       return;
     }
+    const userId = await adminService.resolveUploadOwnerId(ctx.state.admin);
     ctx.body = {
       code: 200,
       data: await uploadService.uploadMedia({
-        userId: ctx.state.admin.adminId,
+        userId,
         module: form.fields.module,
         type: form.fields.type,
         filename: file.filename,

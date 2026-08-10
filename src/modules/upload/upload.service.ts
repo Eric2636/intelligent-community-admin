@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import COS from 'cos-nodejs-sdk-v5';
 import { getCredential } from 'qcloud-cos-sts';
 import { HttpError } from '../../http-error';
+import { prisma } from '../../lib/prisma';
+import { MediaAssetService } from '../media/media-asset.service';
 
 const UPLOAD_MODULES = new Set(['forum', 'task', 'mall', 'avatar']);
 const UPLOAD_TYPES = new Set(['img', 'vid']);
@@ -172,7 +174,28 @@ export class UploadService {
       );
     });
 
-    return { url: publicObjectUrl(bucket, region, key), key, bucket, region };
+    const url = publicObjectUrl(bucket, region, key);
+    try {
+      await new MediaAssetService({
+        database: prisma,
+        bucket,
+        region,
+        envPrefix: this.getEnvPrefix(),
+      }).registerUploaded({
+        userId: params.userId,
+        module: scope.module,
+        type: scope.type,
+        key,
+        url,
+      });
+    } catch (error) {
+      await new Promise<void>((resolve) => {
+        cos.deleteObject({ Bucket: bucket, Region: region, Key: key }, () => resolve());
+      });
+      throw new HttpError(500, `媒体上传登记失败：${error instanceof Error ? error.message : '未知错误'}`);
+    }
+
+    return { url, key, bucket, region };
   }
 
   async presignGetObjectUrl(params: { key: string; expiresSeconds?: number }) {

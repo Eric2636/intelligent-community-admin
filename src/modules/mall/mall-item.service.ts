@@ -14,6 +14,7 @@ import {
 } from '../../lib/redis-cache';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { effectiveUserTag, resolveEffectiveUserTags } from '../user/user-identity';
+import { configuredMediaAssetService } from '../media/media-asset.service';
 import { MallCategoryService } from './mall-category.service';
 import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
 import type { UpdateMallItemDto } from './mall.dto';
@@ -153,7 +154,7 @@ export class MallItemService {
         where: { id: params.userId },
         select: { name: true, avatar: true },
       });
-      return tx.mallItem.create({
+      const created = await tx.mallItem.create({
         data: {
           categoryId,
           title: params.title.trim(),
@@ -178,6 +179,12 @@ export class MallItemService {
           visibility: MALL_DEFAULT_VISIBILITY,
         },
       });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, {
+        uploaderId: params.userId,
+        urls: [...normalizedMainImages, ...normalizedSubImages, ...videos],
+      });
+      return created;
     });
     const s = (await this.withCurrentUserTags([serializeMallItem(row)]))[0];
     await invalidateMallItemsListCache();
@@ -262,7 +269,19 @@ export class MallItemService {
     }
 
     if (Object.keys(data).length === 0) throw new HttpError(400, '没有可更新的内容');
-    const row = await prisma.mallItem.update({ where: { id: current.id }, data });
+    const lifecycle = configuredMediaAssetService(prisma);
+    const applyUpdate = async (tx: typeof prisma) => {
+      const updated = await tx.mallItem.update({ where: { id: current.id }, data });
+      const next = serializeMallItem(updated);
+      const oldUrls = [...serializedCurrent.mainImages, ...serializedCurrent.subImages, ...serializedCurrent.videos];
+      const nextUrls = [...next.mainImages, ...next.subImages, ...next.videos];
+      await lifecycle?.attachUrls(tx, { uploaderId: params.userId, urls: nextUrls });
+      await lifecycle?.requestDeleteUrls(tx, oldUrls.filter((url) => !nextUrls.includes(url)));
+      return updated;
+    };
+    const row = lifecycle
+      ? await prisma.$transaction((tx) => applyUpdate(tx as typeof prisma))
+      : await applyUpdate(prisma);
     await Promise.all([
       invalidateMallItemsListCache(),
       invalidateMallItemDetailCache(current.id),
@@ -291,10 +310,26 @@ export class MallItemService {
 
   async deleteItem(params: { userId: string; itemId: string }) {
     const current = await this.getOwnedItem(params.userId, params.itemId);
-    await prisma.mallItem.update({
-      where: { id: current.id },
-      data: { deletedAt: new Date() },
-    });
+    const lifecycle = configuredMediaAssetService(prisma);
+    const applyDelete = async (tx: typeof prisma) => {
+      const comments = await tx.mallItemComment.findMany({
+        where: { itemId: current.id },
+        select: { images: true },
+      });
+      await tx.mallItem.update({
+        where: { id: current.id },
+        data: { deletedAt: new Date() },
+      });
+      const currentMedia = serializeMallItem(current);
+      await lifecycle?.requestDeleteUrls(tx, [
+        ...currentMedia.mainImages,
+        ...currentMedia.subImages,
+        ...currentMedia.videos,
+        ...comments.flatMap((comment) => Array.isArray(comment.images) ? comment.images as string[] : []),
+      ]);
+    };
+    if (lifecycle) await prisma.$transaction((tx) => applyDelete(tx as typeof prisma));
+    else await applyDelete(prisma);
     await Promise.all([
       invalidateMallItemsListCache(),
       invalidateMallItemDetailCache(current.id),

@@ -48,6 +48,28 @@ model AvatarReview {
   @@map("avatar_reviews")
 }
 
+/// 上传到 COS 的业务媒体资产；业务记录只保留 URL，生命周期统一由本表管理。
+model MediaAsset {
+  id                  String          @id @default(cuid())
+  objectKey           String          @unique @db.VarChar(512)
+  url                 String          @db.Text
+  uploaderId          String          @db.VarChar(191)
+  module              String          @db.VarChar(32)
+  mediaType           MediaAssetType
+  state               MediaAssetState @default(PENDING)
+  attachedAt          DateTime?
+  deleteRequestedAt   DateTime?
+  deletedAt           DateTime?
+  deleteAttempts      Int             @default(0)
+  lastDeleteError     String?         @db.Text
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  @@index([state, createdAt])
+  @@index([state, deleteRequestedAt])
+  @@map("media_assets")
+}
+
 model Feedback {
   id        String   @id @default(cuid())
   userId    String
@@ -592,6 +614,19 @@ model MallOrder {
 enum AdminRole {
   ADMIN
   SUPERADMIN
+}
+
+enum MediaAssetState {
+  PENDING
+  ATTACHED
+  DELETE_PENDING
+  DELETED
+  DELETE_FAILED
+}
+
+enum MediaAssetType {
+  IMG
+  VID
 }
 
 enum AdminType {

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import COS from 'cos-nodejs-sdk-v5';
 import { getCredential } from 'qcloud-cos-sts';
 import { HttpError } from '../../http-error';
+import { prisma } from '../../lib/prisma';
+import { MediaAssetService } from '../media/media-asset.service';
 
 const UPLOAD_MODULES = new Set(['forum', 'task', 'mall', 'avatar']);
 const UPLOAD_TYPES = new Set(['img', 'vid']);
@@ -172,7 +174,21 @@ export class UploadService {
       );
     });
 
-    return { url: publicObjectUrl(bucket, region, key), key, bucket, region };
+    const url = publicObjectUrl(bucket, region, key);
+    await new MediaAssetService({
+      database: prisma,
+      bucket,
+      region,
+      envPrefix: this.getEnvPrefix(),
+    }).registerUploaded({
+      userId: params.userId,
+      module: scope.module,
+      type: scope.type,
+      key,
+      url,
+    });
+
+    return { url, key, bucket, region };
   }
 
   async presignGetObjectUrl(params: { key: string; expiresSeconds?: number }) {

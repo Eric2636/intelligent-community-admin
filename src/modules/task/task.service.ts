@@ -10,6 +10,7 @@ import {
   TASK_PENDING_LIST_TTL_SEC,
 } from '../../lib/redis-cache';
 import { notify } from '../notification/notification-notify';
+import { configuredMediaAssetService } from '../media/media-asset.service';
 import { avatarOrDefault } from '../user/default-avatar';
 import { effectiveUserTag, resolveEffectiveUserTags, type EffectiveUserTag } from '../user/user-identity';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
@@ -17,11 +18,15 @@ import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
 
-type TaskDatabase = Pick<PrismaClient, '$transaction'>;
+type TaskDatabase = Pick<PrismaClient, '$transaction' | 'task' | 'user' | 'adminUser'>;
 
 function taskNotificationContent(taskTitle: string, action: string) {
   const title = Array.from(String(taskTitle || '').trim()).slice(0, 80).join('');
   return title ? `“${title}”${action}` : action;
+}
+
+function mediaUrls(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((url): url is string => typeof url === 'string') : [];
 }
 
 export class TaskService {
@@ -44,7 +49,7 @@ export class TaskService {
   async getTaskDetail(taskId: string) {
     const id = String(taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
-    const row = await prisma.task.findFirst({
+    const row = await this.database.task.findFirst({
       where: { id, visibility: 'ONLINE', ...contentNotDeleted },
     });
     if (!row) throw new HttpError(404, '任务不存在');
@@ -74,13 +79,13 @@ export class TaskService {
 
     const images = parseStrictMediaUrlList(params.images, MAX_TASK_IMAGES, 'image', 'images');
     const videos = parseStrictMediaUrlList(params.videos, MAX_TASK_VIDEOS, 'video', 'videos');
-    const row = await prisma.$transaction(async (tx) => {
+    const row = await this.database.$transaction(async (tx) => {
       await lockUsersForProfileSnapshot(tx, [params.publisherId]);
       const publisher = await tx.user.findUnique({
         where: { id: params.publisherId },
         select: { name: true, avatar: true },
       });
-      return tx.task.create({
+      const row = await tx.task.create({
         data: {
           title,
           desc,
@@ -94,6 +99,9 @@ export class TaskService {
           publisherAvatar: publisher?.avatar ?? null,
         },
       });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: params.publisherId, urls: [...images, ...videos] });
+      return row;
     });
 
     await invalidatePendingTasksListCache();
@@ -158,9 +166,20 @@ export class TaskService {
         if (transition.count !== 1) throw new HttpError(409, '任务状态已变化，请刷新后重试');
         const updated = await tx.task.findUnique({ where: { id } });
         if (!updated) throw new HttpError(404, '草稿不存在');
+        const media = configuredMediaAssetService(tx);
+        const oldUrls = [
+          ...(Array.isArray(row.images) ? row.images : []),
+          ...(Array.isArray(row.videos) ? row.videos : []),
+        ] as string[];
+        const nextUrls = [...images, ...videos];
+        await media?.attachUrls(tx, { uploaderId: params.userId, urls: nextUrls });
+        await media?.requestDeleteUrls(tx, oldUrls.filter((url) => !nextUrls.includes(url)));
         return updated;
       }
-      return tx.task.create({ data: { ...data, status: 'DRAFT' } });
+      const created = await tx.task.create({ data: { ...data, status: 'DRAFT' } });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: params.userId, urls: [...images, ...videos] });
+      return created;
     }).then((row) => this.mapTaskWithCurrentTag(row));
   }
 
@@ -236,7 +255,7 @@ export class TaskService {
         where.title = { contains: keyword.trim() };
       }
 
-      const rows = await prisma.task.findMany({
+      const rows = await this.database.task.findMany({
         where,
         orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
         skip,
@@ -268,7 +287,7 @@ export class TaskService {
       where.status = { notIn: [TaskStatus.DRAFT, TaskStatus.CANCELLED] };
     }
 
-    const rows = await prisma.task.findMany({
+    const rows = await this.database.task.findMany({
       where,
       orderBy: { createdAt: 'desc' },
     });
@@ -366,6 +385,8 @@ export class TaskService {
       if (transition.count !== 1) throw new HttpError(409, '任务状态已变化，请刷新后重试');
       const updated = await tx.task.findUnique({ where: { id } });
       if (!updated) throw new HttpError(404, '任务不存在');
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: params.userId, urls: proofImages });
       await notify(tx, {
         recipientId: row.publisherId,
         actorId: params.userId,
@@ -578,6 +599,12 @@ export class TaskService {
           },
         });
         if (transition.count !== 1) throw new HttpError(409, '任务状态已变化，请刷新后重试');
+        const media = configuredMediaAssetService(tx);
+        await media?.requestDeleteUrls(tx, [
+          ...mediaUrls(row.images),
+          ...mediaUrls(row.videos),
+          ...mediaUrls(row.proofImages),
+        ]);
         return { ok: true };
       })
       .then(async () => {
@@ -640,12 +667,12 @@ export class TaskService {
   }
 
   private async mapTaskWithCurrentTag(t: Parameters<TaskService['mapTask']>[0]) {
-    const tags = await resolveEffectiveUserTags(prisma, [t.publisherId]);
+    const tags = await resolveEffectiveUserTags(this.database, [t.publisherId]);
     return this.mapTask(t, tags.get(t.publisherId));
   }
 
   private async mapTaskList(rows: Parameters<TaskService['mapTask']>[0][]) {
-    const tags = await resolveEffectiveUserTags(prisma, rows.map((row) => row.publisherId));
+    const tags = await resolveEffectiveUserTags(this.database, rows.map((row) => row.publisherId));
     return rows.map((row) => this.mapTask(row, tags.get(row.publisherId)));
   }
 

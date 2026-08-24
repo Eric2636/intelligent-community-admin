@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { HttpError } from '../../http-error';
 import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
@@ -14,16 +14,26 @@ import {
 } from '../../lib/redis-cache';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { effectiveUserTag, resolveEffectiveUserTags } from '../user/user-identity';
+import { configuredMediaAssetService } from '../media/media-asset.service';
 import { MallCategoryService } from './mall-category.service';
 import { MALL_DEFAULT_VISIBILITY, MALL_LIST_CAP } from './mall.constants';
 import type { UpdateMallItemDto } from './mall.dto';
 import { jsonImages, parsePriceNum, serializeMallItem } from './mall.serialize';
+import {
+  assertMallItemHasContact,
+  normalizeLegacyContact,
+  normalizePhoneContact,
+  normalizePhoneIsWechat,
+  normalizeWechatContact,
+} from './mall-contact';
 
 export class MallItemService {
   private readonly categories = new MallCategoryService();
 
+  constructor(private readonly database: PrismaClient = prisma) {}
+
   private async withCurrentUserTags<T extends { publisherId: string; userTagLabel?: string; userTagType?: string }>(items: T[]) {
-    const tags = await resolveEffectiveUserTags(prisma, items.map((item) => item.publisherId));
+    const tags = await resolveEffectiveUserTags(this.database, items.map((item) => item.publisherId));
     return items.map((item) => {
       const tag = tags.get(item.publisherId) ?? effectiveUserTag(null);
       return { ...item, userTagLabel: tag.label, userTagType: tag.type };
@@ -51,7 +61,7 @@ export class MallItemService {
         where.OR = [{ title: { contains: k } }, { desc: { contains: k } }];
       }
 
-      const rows = await prisma.mallItem.findMany({
+      const rows = await this.database.mallItem.findMany({
         where,
         orderBy: { createdAt: 'desc' },
         take: MALL_LIST_CAP,
@@ -70,7 +80,7 @@ export class MallItemService {
       return this.withCurrentUserTags(base.map((item) => ({ ...item, isFavorited: false })));
     }
 
-    const favorites = await prisma.mallItemFavorite.findMany({
+    const favorites = await this.database.mallItemFavorite.findMany({
       where: { userId: params.userId, itemId: { in: base.map((item) => item.id) } },
       select: { itemId: true },
     });
@@ -83,7 +93,7 @@ export class MallItemService {
     if (!id) throw new HttpError(400, '商品 id 不能为空');
 
     const base = await cacheAsideJson(mallItemDetailCacheKey(id), MALL_ITEM_DETAIL_TTL_SEC, async () => {
-      const row = await prisma.mallItem.findFirst({
+      const row = await this.database.mallItem.findFirst({
         where: { id, ...contentNotDeleted },
       });
       if (!row) throw new HttpError(404, '商品不存在');
@@ -94,7 +104,7 @@ export class MallItemService {
     }
 
     const fav = params.userId
-      ? await prisma.mallItemFavorite.findUnique({
+      ? await this.database.mallItemFavorite.findUnique({
           where: { itemId_userId: { itemId: id, userId: params.userId } },
         })
       : null;
@@ -109,6 +119,9 @@ export class MallItemService {
     price?: string;
     unit?: string;
     desc?: string;
+    wechatContact?: string;
+    phoneContact?: string;
+    phoneIsWechat?: boolean;
     contact?: string;
     locationName?: string;
     locationAddress?: string;
@@ -132,20 +145,28 @@ export class MallItemService {
     if (imgTotal > 6) throw new HttpError(400, '图片最多上传 6 张（主图+副图合计）');
 
     const categoryId = await this.categories.assertEnabledCategoryId(params.categoryId);
-    const row = await prisma.$transaction(async (tx) => {
+    const wechatContact = normalizeWechatContact(params.wechatContact);
+    const phoneContact = normalizePhoneContact(params.phoneContact);
+    const phoneIsWechat = normalizePhoneIsWechat(params.phoneIsWechat, phoneContact);
+    const legacyContact = normalizeLegacyContact(params.contact);
+    assertMallItemHasContact({ wechatContact, phoneContact, legacyContact });
+    const row = await this.database.$transaction(async (tx) => {
       await lockUsersForProfileSnapshot(tx, [params.userId]);
       const publisher = await tx.user.findUnique({
         where: { id: params.userId },
         select: { name: true, avatar: true },
       });
-      return tx.mallItem.create({
+      const created = await tx.mallItem.create({
         data: {
           categoryId,
           title: params.title.trim(),
           price: params.price?.trim() || null,
           unit: (params.unit?.trim() || '元').slice(0, 16),
           desc: params.desc?.trim() || '',
-          contact: params.contact?.trim() || null,
+          wechatContact,
+          phoneContact,
+          phoneIsWechat,
+          contact: wechatContact || phoneContact ? null : legacyContact,
           locationName: params.locationName?.trim() || null,
           locationAddress: params.locationAddress?.trim() || null,
           latitude: Number.isFinite(params.latitude) ? params.latitude : null,
@@ -160,6 +181,12 @@ export class MallItemService {
           visibility: MALL_DEFAULT_VISIBILITY,
         },
       });
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, {
+        uploaderId: params.userId,
+        urls: [...normalizedMainImages, ...normalizedSubImages, ...videos],
+      });
+      return created;
     });
     const s = (await this.withCurrentUserTags([serializeMallItem(row)]))[0];
     await invalidateMallItemsListCache();
@@ -167,7 +194,7 @@ export class MallItemService {
   }
 
   async getMyItems(params: { userId: string }) {
-    const rows = await prisma.mallItem.findMany({
+    const rows = await this.database.mallItem.findMany({
       where: { publisherId: params.userId, ...contentNotDeleted },
       orderBy: { createdAt: 'desc' },
     });
@@ -178,7 +205,7 @@ export class MallItemService {
     const userId = String(userIdRaw || '').trim();
     const itemId = String(itemIdRaw || '').trim();
     if (!itemId) throw new HttpError(400, '商品 id 不能为空');
-    const row = await prisma.mallItem.findFirst({
+    const row = await this.database.mallItem.findFirst({
       where: { id: itemId, ...contentNotDeleted },
     });
     if (!row) throw new HttpError(404, '商品不存在');
@@ -202,7 +229,26 @@ export class MallItemService {
     if (dto.price !== undefined) data.price = dto.price?.trim() || null;
     if (dto.unit !== undefined) data.unit = (dto.unit.trim() || '元').slice(0, 16);
     if (dto.desc !== undefined) data.desc = dto.desc.trim();
-    if (dto.contact !== undefined) data.contact = dto.contact?.trim() || null;
+    const hasStructuredContactUpdate = dto.wechatContact !== undefined || dto.phoneContact !== undefined || dto.phoneIsWechat !== undefined;
+    if (hasStructuredContactUpdate) {
+      const wechatContact = dto.wechatContact === undefined
+        ? current.wechatContact
+        : normalizeWechatContact(dto.wechatContact);
+      const phoneContact = dto.phoneContact === undefined
+        ? current.phoneContact
+        : normalizePhoneContact(dto.phoneContact);
+      const phoneIsWechat = normalizePhoneIsWechat(
+        dto.phoneIsWechat === undefined ? current.phoneIsWechat : dto.phoneIsWechat,
+        phoneContact,
+      );
+      const legacyContact = normalizeLegacyContact(current.contact);
+      assertMallItemHasContact({ wechatContact, phoneContact, legacyContact });
+      data.wechatContact = wechatContact;
+      data.phoneContact = phoneContact;
+      data.phoneIsWechat = phoneIsWechat;
+      if (wechatContact || phoneContact) data.contact = null;
+    }
+    if (dto.contact !== undefined && !hasStructuredContactUpdate) data.contact = normalizeLegacyContact(dto.contact);
     if (dto.locationName !== undefined) data.locationName = dto.locationName?.trim() || null;
     if (dto.locationAddress !== undefined) data.locationAddress = dto.locationAddress?.trim() || null;
     if (dto.latitude !== undefined) data.latitude = Number.isFinite(dto.latitude) ? dto.latitude : null;
@@ -225,7 +271,19 @@ export class MallItemService {
     }
 
     if (Object.keys(data).length === 0) throw new HttpError(400, '没有可更新的内容');
-    const row = await prisma.mallItem.update({ where: { id: current.id }, data });
+    const lifecycle = configuredMediaAssetService(prisma);
+    const applyUpdate = async (tx: typeof prisma) => {
+      const updated = await tx.mallItem.update({ where: { id: current.id }, data });
+      const next = serializeMallItem(updated);
+      const oldUrls = [...serializedCurrent.mainImages, ...serializedCurrent.subImages, ...serializedCurrent.videos];
+      const nextUrls = [...next.mainImages, ...next.subImages, ...next.videos];
+      await lifecycle?.attachUrls(tx, { uploaderId: params.userId, urls: nextUrls });
+      await lifecycle?.requestDeleteUrls(tx, oldUrls.filter((url) => !nextUrls.includes(url)));
+      return updated;
+    };
+    const row = lifecycle
+      ? await this.database.$transaction((tx) => applyUpdate(tx as typeof prisma))
+      : await applyUpdate(prisma);
     await Promise.all([
       invalidateMallItemsListCache(),
       invalidateMallItemDetailCache(current.id),
@@ -241,7 +299,7 @@ export class MallItemService {
     const current = await this.getOwnedItem(params.userId, params.itemId);
     const row = current.visibility === params.visibility
       ? current
-      : await prisma.mallItem.update({
+      : await this.database.mallItem.update({
           where: { id: current.id },
           data: { visibility: params.visibility },
         });
@@ -254,10 +312,26 @@ export class MallItemService {
 
   async deleteItem(params: { userId: string; itemId: string }) {
     const current = await this.getOwnedItem(params.userId, params.itemId);
-    await prisma.mallItem.update({
-      where: { id: current.id },
-      data: { deletedAt: new Date() },
-    });
+    const lifecycle = configuredMediaAssetService(prisma);
+    const applyDelete = async (tx: typeof prisma) => {
+      const comments = await tx.mallItemComment.findMany({
+        where: { itemId: current.id },
+        select: { images: true },
+      });
+      await tx.mallItem.update({
+        where: { id: current.id },
+        data: { deletedAt: new Date() },
+      });
+      const currentMedia = serializeMallItem(current);
+      await lifecycle?.requestDeleteUrls(tx, [
+        ...currentMedia.mainImages,
+        ...currentMedia.subImages,
+        ...currentMedia.videos,
+        ...comments.flatMap((comment) => Array.isArray(comment.images) ? comment.images as string[] : []),
+      ]);
+    };
+    if (lifecycle) await this.database.$transaction((tx) => applyDelete(tx as typeof prisma));
+    else await applyDelete(prisma);
     await Promise.all([
       invalidateMallItemsListCache(),
       invalidateMallItemDetailCache(current.id),

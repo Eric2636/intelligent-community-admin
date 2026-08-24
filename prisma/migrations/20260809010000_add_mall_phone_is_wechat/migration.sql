@@ -1,0 +1,2 @@
+ALTER TABLE `mall_items`
+  ADD COLUMN `phoneIsWechat` BOOLEAN NOT NULL DEFAULT FALSE;

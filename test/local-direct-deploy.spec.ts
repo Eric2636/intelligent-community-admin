@@ -50,7 +50,8 @@ test('发布预检只校验所选发布范围对应的仓库', () => {
   assert.match(preflight, /3\)[\s\S]*require_clean_branch "\$API_REPOSITORY" "\$TARGET_BRANCH"[\s\S]*require_clean_branch "\$WEB_REPOSITORY" "\$TARGET_BRANCH"/);
   const scopeOne = preflight.slice(preflight.indexOf('1)'), preflight.indexOf('2)'));
   const scopeTwo = preflight.slice(preflight.indexOf('2)'), preflight.indexOf('3)'));
-  assert.match(scopeOne, /API_ENV_FILE[\s\S]*API_BACKUP_ENV_FILE/);
+  assert.match(scopeOne, /API_ENV_FILE/);
+  assert.doesNotMatch(scopeOne, /API_BACKUP_ENV_FILE/);
   assert.match(scopeTwo, /docker network inspect deploy_default/);
   assert.doesNotMatch(scopeTwo, /API_ENV_FILE|API_BACKUP_ENV_FILE/);
 });
@@ -65,15 +66,18 @@ test('发布脚本从本地同步，测试与生产容器严格隔离', () => {
   assert.match(testEntry, /API_CONTAINER=ic-test-admin-api/);
   assert.match(testEntry, /WEB_CONTAINER=ic-test-admin-web/);
   assert.match(testEntry, /API_PORT_ARGS='-p 3002:3000'/);
+  assert.match(testEntry, /API_BACKUP_ENV_FILE=.*\.env\.test\.backup/);
   assert.match(testEntry, /WEB_API_UPSTREAM=api-test:3000/);
   assert.doesNotMatch(testEntry, /WEB_BUILD_ARGS|WEB_BUILD_NO_CACHE/);
   assert.match(productionEntry, /API_CONTAINER=ic-admin-api/);
   assert.match(productionEntry, /WEB_CONTAINER=ic-admin-web/);
+  assert.match(productionEntry, /^API_BACKUP_ENV_FILE=$/m);
   assert.match(productionEntry, /^API_PORT_ARGS=$/m);
   assert.doesNotMatch(productionEntry, /WEB_BUILD_ARGS|WEB_BUILD_NO_CACHE/);
   const apiDeploy = release.slice(release.indexOf('deploy_api()'), release.indexOf('deploy_web()'));
   const webDeploy = release.slice(release.indexOf('deploy_web()'));
   assert.doesNotMatch(apiDeploy, /WEB_BUILD_ARGS/);
+  assert.match(apiDeploy, /backup_env_args/);
   assert.match(webDeploy, /TARGET_ENV" = test/);
   assert.match(webDeploy, /docker build --no-cache --build-arg VITE_APP_BASE=\/test-admin\//);
   assert.match(webDeploy, /web_build_command/);
@@ -95,4 +99,25 @@ test('父级目录是唯一发布入口，后端旧入口只负责兼容转发',
   assert.match(productionEntry, /exec "\$SCRIPT_DIR\/release\.sh"/);
   assert.match(legacyTestEntry, /exec "\$PROJECT_ROOT\/deploy-test\.sh"/);
   assert.match(legacyProductionEntry, /exec "\$PROJECT_ROOT\/deploy-production\.sh"/);
+});
+
+test('一键发布从开发分支提交并合并到对应环境分支，再部署后切回开发分支', () => {
+  const release = workspaceSource('release.sh');
+  const testEntry = workspaceSource('deploy-test.sh');
+  const productionEntry = workspaceSource('deploy-production.sh');
+
+  assert.match(testEntry, /^SOURCE_BRANCH=dev$/m);
+  assert.match(testEntry, /^TARGET_BRANCH=test$/m);
+  assert.match(productionEntry, /^SOURCE_BRANCH=dev$/m);
+  assert.match(productionEntry, /^TARGET_BRANCH=master$/m);
+  assert.match(release, /git -C "\$repository" add -A/);
+  assert.match(release, /git -C "\$repository" commit -m/);
+  assert.match(release, /git -C "\$repository" push origin "\$SOURCE_BRANCH"/);
+  assert.match(release, /git -C "\$repository" merge --no-ff "\$SOURCE_BRANCH"/);
+  assert.match(release, /git -C "\$repository" push origin "\$TARGET_BRANCH"/);
+  assert.match(release, /git -C "\$repository" switch "\$SOURCE_BRANCH"/);
+  assert.match(release, /确认暂存、提交、合并并推送/);
+  const prepare = release.slice(release.indexOf('prepare_source_repositories()'), release.indexOf('return_to_source_branches()'));
+  assert.match(prepare, /if \[ "\$\(git -C "\$repository" branch --show-current\)" != "\$SOURCE_BRANCH" \]; then\n\s+require_clean_repository "\$repository"/);
+  assert.doesNotMatch(prepare, /for repository in "\$\{SELECTED_REPOSITORIES\[@\]\}"; do\n\s+require_clean_repository/);
 });

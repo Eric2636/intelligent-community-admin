@@ -113,6 +113,7 @@ test('only the publisher can change visibility', async (t) => {
 
 test('publisher visibility and delete mutations persist state and return server summaries', async (t) => {
   disableRedisForTest(t);
+  stubMethod(t, prisma, '$transaction', async (...args: never[]) => (args[0] as (tx: typeof prisma) => Promise<unknown>)(prisma));
   const updates: unknown[] = [];
   stubMethod(t, prisma.mallItem, 'findFirst', async () => row);
   stubMethod(t, prisma.mallItem, 'update', async (...args: never[]) => {
@@ -138,6 +139,7 @@ test('publisher visibility and delete mutations persist state and return server 
 
 test('publisher can edit existing fields without changing ownership or workflow state', async (t) => {
   disableRedisForTest(t);
+  stubMethod(t, prisma, '$transaction', async (...args: never[]) => (args[0] as (tx: typeof prisma) => Promise<unknown>)(prisma));
   let updateData: Record<string, unknown> | undefined;
   stubMethod(t, prisma.mallItem, 'findFirst', async () => row);
   stubMethod(t, prisma.mallItem, 'update', async (...args: never[]) => {

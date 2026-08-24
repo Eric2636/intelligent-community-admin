@@ -17,10 +17,13 @@ import {
   GetForumAnnouncementsQueryDto,
   GetForumPostsQueryDto,
   PublishForumPostDto,
+  UpdateForumPostDto,
   PublishForumReplyDto,
+  SetForumPostPinnedDto,
   SetForumReplyReactionDto,
 } from '../modules/forum/forum.dto';
 import { ForumService } from '../modules/forum/forum.service';
+import { ForumRegistrationService } from '../modules/forum/forum-registration.service';
 import { MallService } from '../modules/mall/mall.service';
 import { SettingsService } from '../modules/settings/settings.service';
 import {
@@ -47,12 +50,15 @@ const authService = new AuthService();
 const userService = new UserService();
 const taskService = new TaskService();
 const forumService = new ForumService();
+const forumRegistrationService = new ForumRegistrationService();
 const uploadService = new UploadService();
 const settingsService = new SettingsService();
 const mallService = new MallService();
 const clientLogService = new ClientLogService();
 const avatarReviewService = new AvatarReviewService();
 const uploadMaxBytes = Number(process.env.UPLOAD_MAX_BYTES || String(100 * 1024 * 1024));
+// Multipart envelope adds headers and boundary bytes; file-level validation remains 20 MiB.
+const forumAttachmentMaxBytes = 25 * 1024 * 1024;
 
 function tryGetUserFromBearer(auth?: string) {
   if (!auth?.startsWith('Bearer ')) return {};
@@ -199,8 +205,46 @@ export function createRouter() {
       content: dto.content,
       images: dto.images,
       videos: dto.videos,
+      postType: dto.postType,
+      featureType: dto.featureType,
+      registrationCapacity: dto.registrationCapacity,
+      registrationDeadlineAt: dto.registrationDeadlineAt,
+      pinned: dto.pinned,
+      attachments: dto.attachments,
     });
     ctx.body = { code: 200, data };
+  });
+
+  router.post('/api/posts/attachments/upload', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    await forumService.assertCanManageAttachments(userId);
+    const form = await parseMultipartForm(ctx.req, ctx.headers['content-type'] || '', { maxBytes: forumAttachmentMaxBytes });
+    const file = form.files.find((item) => item.fieldName === 'file') || form.files[0];
+    if (!file) throw new HttpError(400, '缺少附件文件');
+    ctx.body = { code: 200, data: await uploadService.uploadForumAttachment({ userId, filename: file.filename, contentType: file.contentType, buffer: file.buffer }) };
+  });
+
+  router.post('/api/posts/attachments/check', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    await forumService.assertCanManageAttachments(userId);
+    const body = jsonBody(ctx) as { sha256?: string; filename?: string; contentType?: string; sizeBytes?: number };
+    ctx.body = {
+      code: 200,
+      data: await uploadService.prepareForumAttachment({
+        userId,
+        sha256: String(body?.sha256 || ''),
+        filename: String(body?.filename || ''),
+        contentType: String(body?.contentType || ''),
+        sizeBytes: Number(body?.sizeBytes),
+      }),
+    };
+  });
+
+  router.patch('/api/posts/:postId', jwtAuth, async (ctx) => {
+    const userId = ctx.state.user!.userId;
+    const postId = String((ctx.params as { postId?: string }).postId || '').trim();
+    const dto = await parseDto(UpdateForumPostDto, jsonBody(ctx));
+    ctx.body = { code: 200, data: await forumService.updatePost({ userId, postId, ...dto }) };
   });
 
   router.post('/api/posts/:postId/replies', jwtAuth, async (ctx) => {
@@ -216,6 +260,27 @@ export function createRouter() {
       videos: dto.videos,
     });
     ctx.body = { code: 200, data };
+  });
+
+  router.post('/api/posts/:postId/registration', jwtAuth, async (ctx) => {
+    const postId = String((ctx.params as { postId?: string }).postId || '').trim();
+    ctx.body = { code: 200, data: await forumRegistrationService.register(postId, ctx.state.user!.userId) };
+  });
+
+  router.delete('/api/posts/:postId/registration', jwtAuth, async (ctx) => {
+    const postId = String((ctx.params as { postId?: string }).postId || '').trim();
+    ctx.body = { code: 200, data: await forumRegistrationService.cancel(postId, ctx.state.user!.userId) };
+  });
+
+  router.get('/api/posts/:postId/registration/entries', jwtAuth, async (ctx) => {
+    const postId = String((ctx.params as { postId?: string }).postId || '').trim();
+    ctx.body = { code: 200, data: await forumService.getRegistrationEntries({ postId, userId: ctx.state.user!.userId }) };
+  });
+
+  router.patch('/api/posts/:postId/pin', jwtAuth, async (ctx) => {
+    const postId = String((ctx.params as { postId?: string }).postId || '').trim();
+    const dto = await parseDto(SetForumPostPinnedDto, jsonBody(ctx));
+    ctx.body = { code: 200, data: await forumService.setPinned({ postId, userId: ctx.state.user!.userId, pinned: dto.pinned }) };
   });
 
   router.post('/api/posts/:postId/replies/:replyId/like', jwtAuth, async (ctx) => {

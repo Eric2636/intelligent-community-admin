@@ -1,7 +1,7 @@
 import COS from 'cos-nodejs-sdk-v5';
 import { HttpError } from '../../http-error';
 
-type MediaAssetState = 'PENDING' | 'ATTACHED' | 'DELETE_PENDING' | 'DELETED' | 'DELETE_FAILED';
+type MediaAssetState = 'PENDING' | 'ATTACHED' | 'DELETING' | 'DELETE_PENDING' | 'DELETED' | 'DELETE_FAILED';
 
 type MediaAssetRecord = {
   id: string;
@@ -9,7 +9,7 @@ type MediaAssetRecord = {
   url: string;
   uploaderId: string;
   module: string;
-  mediaType: 'IMG' | 'VID';
+  mediaType: 'IMG' | 'VID' | 'FILE';
   state: MediaAssetState;
   attachedAt: Date | null;
   deleteRequestedAt: Date | null;
@@ -17,6 +17,9 @@ type MediaAssetRecord = {
   deleteAttempts: number;
   lastDeleteError: string | null;
   createdAt: Date;
+  forumAttachmentBlobId?: string | null;
+  forumAttachmentBlob?: { id: string; objectKey: string; deletedAt: Date | null; deleteRequestedAt?: Date | null } | null;
+  forumPostAttachment?: { id: string } | null;
 };
 
 type MediaAssetStore = {
@@ -27,12 +30,13 @@ type MediaAssetStore = {
 
 type MediaAssetDatabase = {
   mediaAsset: MediaAssetStore;
+  forumAttachmentBlob?: { updateMany: (args: any) => PromiseLike<{ count: number }> };
 };
 
 type DeleteObject = (objectKey: string) => Promise<void>;
 
 const SUPPORTED_MODULES = new Set(['forum', 'task', 'mall', 'avatar']);
-const SUPPORTED_TYPES = new Set(['img', 'vid']);
+const SUPPORTED_TYPES = new Set(['img', 'vid', 'file']);
 const PENDING_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 function uniqueStrings(values: string[]) {
@@ -104,9 +108,12 @@ export class MediaAssetService {
   async registerUploaded(params: {
     userId: string;
     module: string;
-    type: 'img' | 'vid';
+    type: 'img' | 'vid' | 'file';
     key: string;
     url: string;
+    originalName?: string;
+    contentType?: string;
+    sizeBytes?: number;
   }) {
     if (!this.isManagedObjectKey(params.key)) throw new HttpError(400, '媒体路径不属于当前环境');
     const [envPrefix, module, type, uploaderId] = params.key.split('/');
@@ -128,14 +135,20 @@ export class MediaAssetService {
         url: params.url,
         uploaderId: params.userId,
         module,
-        mediaType: type === 'vid' ? 'VID' : 'IMG',
+        mediaType: type === 'vid' ? 'VID' : type === 'file' ? 'FILE' : 'IMG',
+        originalName: params.originalName,
+        contentType: params.contentType,
+        sizeBytes: params.sizeBytes,
         state: 'PENDING',
       },
       update: {
         url: params.url,
         uploaderId: params.userId,
         module,
-        mediaType: type === 'vid' ? 'VID' : 'IMG',
+        mediaType: type === 'vid' ? 'VID' : type === 'file' ? 'FILE' : 'IMG',
+        originalName: params.originalName,
+        contentType: params.contentType,
+        sizeBytes: params.sizeBytes,
         state: 'PENDING',
         attachedAt: null,
         deleteRequestedAt: null,
@@ -177,19 +190,70 @@ export class MediaAssetService {
   async deleteAsset(asset: MediaAssetRecord) {
     if (!this.isManagedObjectKey(asset.objectKey)) return 'skipped' as const;
     const isExpiredPending = asset.state === 'PENDING' && asset.createdAt.getTime() <= this.now().getTime() - PENDING_RETENTION_MS;
-    const isQueued = asset.state === 'DELETE_PENDING' || asset.state === 'DELETE_FAILED';
-    if (!isExpiredPending && !isQueued) return 'skipped' as const;
+    const isQueued = asset.state === 'DELETING' || asset.state === 'DELETE_PENDING' || asset.state === 'DELETE_FAILED';
+    const orphanForumFile = asset.state === 'ATTACHED' && asset.module === 'forum' && asset.mediaType === 'FILE' && !asset.forumPostAttachment;
+    if (!isExpiredPending && !isQueued && !orphanForumFile) return 'skipped' as const;
+
+    // 先原子抢占当前状态，再重读记录；发布/编辑若已将 PENDING 转为 ATTACHED，抢占会失败。
+    const claimed = await this.database.mediaAsset.updateMany({
+      where: { id: asset.id, state: isExpiredPending ? 'PENDING' : orphanForumFile ? 'ATTACHED' : { in: ['DELETE_PENDING', 'DELETE_FAILED', 'DELETING'] } },
+      data: { state: 'DELETING' },
+    });
+    if (claimed.count !== 1) return 'skipped' as const;
+    const freshRows = this.database.mediaAsset.findMany
+      ? await this.database.mediaAsset.findMany({ where: { id: asset.id }, include: { forumAttachmentBlob: true, forumPostAttachment: true } })
+      : [];
+    const fresh = freshRows[0] || { ...asset, state: 'DELETING' as const };
+    if (fresh.state !== 'DELETING') return 'skipped' as const;
+    // ATTACHED 兜底查询可能在关联事务提交前拿到旧快照；重读发现关系已存在时，恢复状态并放弃清理。
+    if (fresh.module === 'forum' && fresh.mediaType === 'FILE' && fresh.forumPostAttachment) {
+      await this.database.mediaAsset.updateMany({ where: { id: asset.id, state: 'DELETING' }, data: { state: 'ATTACHED' } });
+      return 'skipped' as const;
+    }
 
     try {
-      await this.deleteObject(asset.objectKey);
+      const blob = fresh.forumAttachmentBlobId && fresh.forumAttachmentBlob;
+      if (blob) {
+        // 先把当前对象标记为清理中，阻止秒传/预检在引用快照期间再创建 PENDING 引用。
+        // objectKey 条件确保复活流程已替换对象时不会误标记新对象。
+        const marked = await this.database.forumAttachmentBlob?.updateMany({
+          where: { id: blob.id, objectKey: blob.objectKey, deletedAt: null },
+          data: { deleteRequestedAt: this.now() },
+        });
+        if (marked && marked.count !== 1) {
+          await this.database.mediaAsset.updateMany({
+            where: { id: asset.id, state: 'DELETING' },
+            data: { state: 'DELETED', deletedAt: this.now(), lastDeleteError: null },
+          });
+          return 'deleted' as const;
+        }
+        const refs = this.database.mediaAsset.findMany
+          ? await this.database.mediaAsset.findMany({ where: { forumAttachmentBlobId: blob.id, state: { not: 'DELETED' } }, select: { id: true } })
+          : [];
+        if (refs.length <= 1) {
+          await this.deleteObject(blob.objectKey);
+          await this.database.forumAttachmentBlob?.updateMany({
+            where: { id: blob.id, objectKey: blob.objectKey, deletedAt: null, deleteRequestedAt: { not: null } },
+            data: { deletedAt: this.now(), deleteRequestedAt: null },
+          });
+        } else {
+          // 仍有其它引用，撤销本次清理标记；若期间已复活/换 key，条件会使本次撤销失效。
+          await this.database.forumAttachmentBlob?.updateMany({
+            where: { id: blob.id, objectKey: blob.objectKey, deletedAt: null, deleteRequestedAt: { not: null } },
+            data: { deleteRequestedAt: null },
+          });
+        }
+      } else {
+        await this.deleteObject(asset.objectKey);
+      }
       await this.database.mediaAsset.updateMany({
-        where: { id: asset.id, state: { in: ['PENDING', 'DELETE_PENDING', 'DELETE_FAILED'] } },
+        where: { id: asset.id, state: 'DELETING' },
         data: { state: 'DELETED', deletedAt: this.now(), lastDeleteError: null },
       });
       return 'deleted' as const;
     } catch (error) {
       await this.database.mediaAsset.updateMany({
-        where: { id: asset.id },
+        where: { id: asset.id, state: 'DELETING' },
         data: {
           state: 'DELETE_FAILED',
           deleteAttempts: asset.deleteAttempts + 1,

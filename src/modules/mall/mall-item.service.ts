@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { HttpError } from '../../http-error';
 import { contentNotDeleted } from '../../lib/content-soft-delete';
 import { parseStrictMediaUrlList } from '../../lib/media-url';
@@ -30,8 +30,10 @@ import {
 export class MallItemService {
   private readonly categories = new MallCategoryService();
 
+  constructor(private readonly database: PrismaClient = prisma) {}
+
   private async withCurrentUserTags<T extends { publisherId: string; userTagLabel?: string; userTagType?: string }>(items: T[]) {
-    const tags = await resolveEffectiveUserTags(prisma, items.map((item) => item.publisherId));
+    const tags = await resolveEffectiveUserTags(this.database, items.map((item) => item.publisherId));
     return items.map((item) => {
       const tag = tags.get(item.publisherId) ?? effectiveUserTag(null);
       return { ...item, userTagLabel: tag.label, userTagType: tag.type };
@@ -59,7 +61,7 @@ export class MallItemService {
         where.OR = [{ title: { contains: k } }, { desc: { contains: k } }];
       }
 
-      const rows = await prisma.mallItem.findMany({
+      const rows = await this.database.mallItem.findMany({
         where,
         orderBy: { createdAt: 'desc' },
         take: MALL_LIST_CAP,
@@ -78,7 +80,7 @@ export class MallItemService {
       return this.withCurrentUserTags(base.map((item) => ({ ...item, isFavorited: false })));
     }
 
-    const favorites = await prisma.mallItemFavorite.findMany({
+    const favorites = await this.database.mallItemFavorite.findMany({
       where: { userId: params.userId, itemId: { in: base.map((item) => item.id) } },
       select: { itemId: true },
     });
@@ -91,7 +93,7 @@ export class MallItemService {
     if (!id) throw new HttpError(400, '商品 id 不能为空');
 
     const base = await cacheAsideJson(mallItemDetailCacheKey(id), MALL_ITEM_DETAIL_TTL_SEC, async () => {
-      const row = await prisma.mallItem.findFirst({
+      const row = await this.database.mallItem.findFirst({
         where: { id, ...contentNotDeleted },
       });
       if (!row) throw new HttpError(404, '商品不存在');
@@ -102,7 +104,7 @@ export class MallItemService {
     }
 
     const fav = params.userId
-      ? await prisma.mallItemFavorite.findUnique({
+      ? await this.database.mallItemFavorite.findUnique({
           where: { itemId_userId: { itemId: id, userId: params.userId } },
         })
       : null;
@@ -148,7 +150,7 @@ export class MallItemService {
     const phoneIsWechat = normalizePhoneIsWechat(params.phoneIsWechat, phoneContact);
     const legacyContact = normalizeLegacyContact(params.contact);
     assertMallItemHasContact({ wechatContact, phoneContact, legacyContact });
-    const row = await prisma.$transaction(async (tx) => {
+    const row = await this.database.$transaction(async (tx) => {
       await lockUsersForProfileSnapshot(tx, [params.userId]);
       const publisher = await tx.user.findUnique({
         where: { id: params.userId },
@@ -192,7 +194,7 @@ export class MallItemService {
   }
 
   async getMyItems(params: { userId: string }) {
-    const rows = await prisma.mallItem.findMany({
+    const rows = await this.database.mallItem.findMany({
       where: { publisherId: params.userId, ...contentNotDeleted },
       orderBy: { createdAt: 'desc' },
     });
@@ -203,7 +205,7 @@ export class MallItemService {
     const userId = String(userIdRaw || '').trim();
     const itemId = String(itemIdRaw || '').trim();
     if (!itemId) throw new HttpError(400, '商品 id 不能为空');
-    const row = await prisma.mallItem.findFirst({
+    const row = await this.database.mallItem.findFirst({
       where: { id: itemId, ...contentNotDeleted },
     });
     if (!row) throw new HttpError(404, '商品不存在');
@@ -280,7 +282,7 @@ export class MallItemService {
       return updated;
     };
     const row = lifecycle
-      ? await prisma.$transaction((tx) => applyUpdate(tx as typeof prisma))
+      ? await this.database.$transaction((tx) => applyUpdate(tx as typeof prisma))
       : await applyUpdate(prisma);
     await Promise.all([
       invalidateMallItemsListCache(),
@@ -297,7 +299,7 @@ export class MallItemService {
     const current = await this.getOwnedItem(params.userId, params.itemId);
     const row = current.visibility === params.visibility
       ? current
-      : await prisma.mallItem.update({
+      : await this.database.mallItem.update({
           where: { id: current.id },
           data: { visibility: params.visibility },
         });
@@ -328,7 +330,7 @@ export class MallItemService {
         ...comments.flatMap((comment) => Array.isArray(comment.images) ? comment.images as string[] : []),
       ]);
     };
-    if (lifecycle) await prisma.$transaction((tx) => applyDelete(tx as typeof prisma));
+    if (lifecycle) await this.database.$transaction((tx) => applyDelete(tx as typeof prisma));
     else await applyDelete(prisma);
     await Promise.all([
       invalidateMallItemsListCache(),

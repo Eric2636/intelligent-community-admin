@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { configuredMediaAssetService } from './media-asset.service';
 
@@ -9,19 +10,25 @@ function intervalMs() {
   return Number.isFinite(configured) ? Math.max(60_000, configured) : DEFAULT_INTERVAL_MS;
 }
 
+export function mediaCleanupWhere(staleBefore: Date): Prisma.MediaAssetWhereInput {
+  return {
+    OR: [
+      { state: 'PENDING' as const, createdAt: { lte: staleBefore } },
+      { state: { in: ['DELETE_PENDING', 'DELETE_FAILED', 'DELETING'] } },
+      { state: 'ATTACHED' as const, module: 'forum', mediaType: 'FILE' as const, forumPostAttachment: { is: null } },
+    ],
+  };
+}
+
 async function cleanupOnce() {
   const media = configuredMediaAssetService(prisma);
   if (!media) throw new Error('媒体清理缺少 COS_BUCKET 或 COS_REGION 配置');
   const staleBefore = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const assets = await prisma.mediaAsset.findMany({
-    where: {
-      OR: [
-        { state: 'PENDING', createdAt: { lte: staleBefore } },
-        { state: { in: ['DELETE_PENDING', 'DELETE_FAILED'] } },
-      ],
-    },
+    where: mediaCleanupWhere(staleBefore),
     orderBy: { createdAt: 'asc' },
     take: BATCH_SIZE,
+    include: { forumAttachmentBlob: true, forumPostAttachment: true },
   });
   for (const asset of assets) {
     await media.deleteAsset(asset);

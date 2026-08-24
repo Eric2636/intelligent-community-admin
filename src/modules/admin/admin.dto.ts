@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { IsArray, IsBoolean, IsDateString, IsIn, IsNumber, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsNumber, IsOptional, IsString, Matches, MaxLength, Min, MinLength } from 'class-validator';
 
 export class AdminLoginDto {
   @IsString()
@@ -246,6 +246,20 @@ export class AdminCreateContentDto {
   postType?: 'NORMAL' | 'ANNOUNCEMENT';
 
   @IsOptional()
+  @IsIn(['CONTENT', 'REGISTRATION'])
+  featureType?: 'CONTENT' | 'REGISTRATION';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  registrationCapacity?: number;
+
+  @IsOptional()
+  @IsDateString()
+  registrationDeadlineAt?: string;
+
+  @IsOptional()
   @IsDateString()
   validUntil?: string;
 
@@ -258,6 +272,10 @@ export class AdminCreateContentDto {
   @IsArray()
   @IsString({ each: true })
   videos?: string[];
+
+  @IsOptional()
+  @IsArray()
+  attachments?: { mediaAssetId: string }[];
 
   @IsOptional()
   @IsArray()
@@ -359,6 +377,20 @@ export class AdminUpdateContentDto {
   postType?: 'NORMAL' | 'ANNOUNCEMENT';
 
   @IsOptional()
+  @IsIn(['CONTENT', 'REGISTRATION'])
+  featureType?: 'CONTENT' | 'REGISTRATION';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  registrationCapacity?: number;
+
+  @IsOptional()
+  @IsDateString()
+  registrationDeadlineAt?: string;
+
+  @IsOptional()
   @IsDateString()
   validUntil?: string;
 
@@ -376,6 +408,10 @@ export class AdminUpdateContentDto {
   @IsArray()
   @IsString({ each: true })
   videos?: string[];
+
+  @IsOptional()
+  @IsArray()
+  attachments?: { mediaAssetId: string }[];
 
   @IsOptional()
   @IsArray()

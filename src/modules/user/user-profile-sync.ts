@@ -67,7 +67,7 @@ export async function lockUsersForProfileSnapshot(
 ): Promise<void> {
   const ids = [...new Set(userIds.map((id) => String(id || '').trim()).filter(Boolean))].sort();
   for (const userId of ids) {
-    await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`User\` WHERE \`id\` = ${userId} FOR UPDATE`);
+    await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`users\` WHERE \`id\` = ${userId} FOR UPDATE`);
   }
 }
 

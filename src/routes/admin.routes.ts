@@ -1,4 +1,5 @@
 import Router from '@koa/router';
+import { HttpError } from '../http-error';
 import { parseMultipartForm } from '../lib/multipart-form';
 import { adminAuth, requireSuperAdmin } from '../middleware/admin-auth';
 import {
@@ -37,6 +38,7 @@ const contentTypeLabels: Record<string, string> = { posts: '小区留言', items
 const uploadService = new UploadService();
 const mallCategoryService = new MallCategoryService();
 const uploadMaxBytes = Number(process.env.UPLOAD_MAX_BYTES || String(100 * 1024 * 1024));
+const forumAttachmentMaxBytes = 25 * 1024 * 1024;
 
 function pageOf(q: { page?: number; pageSize?: number }) {
   return {
@@ -325,6 +327,11 @@ export function registerAdminRoutes(
     ctx.body = { code: 200, data };
   });
 
+  router.get('/api/admin/contents/posts/:id/registration-entries', adminAuth, async (ctx) => {
+    const id = String((ctx.params as { id?: string }).id || '').trim();
+    ctx.body = { code: 200, data: await adminService.getForumRegistrationEntries(id, ctx.state.admin) };
+  });
+
   router.post('/api/admin/contents/:type', adminAuth, async (ctx) => {
     const type = String((ctx.params as { type?: string }).type || '').trim();
     if (!contentTypes.has(type)) {
@@ -469,6 +476,32 @@ export function registerAdminRoutes(
         filename: file.filename,
         contentType: file.contentType,
         buffer: file.buffer,
+      }),
+    };
+  });
+
+  router.post('/api/admin/posts/attachments/upload', adminAuth, async (ctx) => {
+    const form = await parseMultipartForm(ctx.req, ctx.headers['content-type'] || '', { maxBytes: forumAttachmentMaxBytes });
+    const file = form.files.find((item) => item.fieldName === 'file') || form.files[0];
+    if (!file) throw new HttpError(400, '缺少附件文件');
+    const userId = await adminService.resolveUploadOwnerId(ctx.state.admin);
+    ctx.body = {
+      code: 200,
+      data: await uploadService.uploadForumAttachment({ userId, filename: file.filename, contentType: file.contentType, buffer: file.buffer }),
+    };
+  });
+
+  router.post('/api/admin/posts/attachments/check', adminAuth, async (ctx) => {
+    const body = jsonBody(ctx) as { sha256?: string; filename?: string; contentType?: string; sizeBytes?: number };
+    const userId = await adminService.resolveUploadOwnerId(ctx.state.admin);
+    ctx.body = {
+      code: 200,
+      data: await uploadService.prepareForumAttachment({
+        userId,
+        sha256: String(body?.sha256 || ''),
+        filename: String(body?.filename || ''),
+        contentType: String(body?.contentType || ''),
+        sizeBytes: Number(body?.sizeBytes),
       }),
     };
   });

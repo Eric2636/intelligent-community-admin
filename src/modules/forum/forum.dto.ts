@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsArray, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
+import { IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
 export class GetForumPostsQueryDto {
   @IsOptional()
@@ -53,6 +53,55 @@ export class PublishForumPostDto {
   @IsOptional()
   @IsString()
   authorName?: string;
+
+  @IsOptional()
+  @IsIn(['NORMAL', 'ANNOUNCEMENT'])
+  postType?: 'NORMAL' | 'ANNOUNCEMENT';
+
+  @IsOptional()
+  @IsIn(['CONTENT', 'REGISTRATION'])
+  featureType?: 'CONTENT' | 'REGISTRATION';
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  registrationCapacity?: number;
+
+  @IsOptional()
+  @IsDateString()
+  registrationDeadlineAt?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  pinned?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  attachments?: { mediaAssetId: string }[];
+}
+
+export class UpdateForumPostDto {
+  @IsOptional()
+  @IsString()
+  title?: string;
+
+  @IsOptional()
+  @IsString()
+  content?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  images?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  videos?: string[];
+
+  @IsOptional()
+  @IsArray()
+  attachments?: { mediaAssetId: string }[];
 }
 
 export class PublishForumReplyDto {
@@ -84,4 +133,9 @@ export class SetForumReplyReactionDto {
   @IsString()
   @MaxLength(32)
   emoji?: string;
+}
+
+export class SetForumPostPinnedDto {
+  @IsBoolean()
+  pinned!: boolean;
 }

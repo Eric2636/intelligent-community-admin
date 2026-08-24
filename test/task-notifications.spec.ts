@@ -151,8 +151,19 @@ function createFakeDatabase(options: {
   }
 
   const database = {
+    user: {
+      findMany: async ({ where }: { where: { id: { in: string[] } } }) =>
+        where.id.in.map((id) => ({ id, identityType: 'OWNER' })),
+    },
     adminUser: {
       findFirst: async () => null,
+      findMany: async () => [],
+    },
+    task: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) =>
+        committed.tasks.find((row) => matchesWhere(row, where)) ?? null,
+      findMany: async ({ where = {} }: { where?: Record<string, unknown> }) =>
+        committed.tasks.filter((row) => matchesWhere(row, where)),
     },
     $transaction: async <T>(
       callback: (tx: ReturnType<typeof transactionClient>) => Promise<T>,
@@ -333,7 +344,11 @@ function createDraftRaceDatabase(initial: TaskRow) {
       },
     };
   const database = {
-    adminUser: { findFirst: async () => null },
+    user: {
+      findMany: async ({ where }: { where: { id: { in: string[] } } }) =>
+        where.id.in.map((id) => ({ id, identityType: 'OWNER' })),
+    },
+    adminUser: { findFirst: async () => null, findMany: async () => [] },
     $transaction: async <T>(callback: (client: typeof tx) => Promise<T>) => callback(tx),
   };
   return { database, shared, tx };
@@ -903,6 +918,11 @@ test('two concurrent claim requests use compare-and-swap so exactly one wins', a
     releaseBarrier = resolve;
   });
   const database = {
+    user: {
+      findMany: async ({ where }: { where: { id: { in: string[] } } }) =>
+        where.id.in.map((id) => ({ id, identityType: 'OWNER' })),
+    },
+    adminUser: { findMany: async () => [] },
     $transaction: async <T>(
       callback: (tx: {
         $queryRaw: () => Promise<unknown[]>;

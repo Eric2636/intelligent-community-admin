@@ -46,3 +46,17 @@ test('forum APIs expose registration summaries, management entries and pin contr
   assert.match(routes, /\/api\/posts\/:postId\/registration\/entries/);
   assert.match(routes, /\/api\/posts\/:postId\/pin/);
 });
+
+test('admin-authored registration ownership uses the active admin identity', () => {
+  const adminService = readFileSync(resolve(process.cwd(), 'src/modules/admin/admin.service.ts'), 'utf8');
+  assert.match(adminService, /authorId:\s*actorId \|\| ADMIN_FORUM_AUTHOR_ID/);
+  assert.match(adminService, /createdByAdminId:\s*operator\.adminId/);
+  assert.match(adminService, /assertCanModifyContent\(operator,\s*type,\s*[^,]+,\s*[^)]+createdByAdminId/);
+  assert.match(adminService, /getForumRegistrationEntries[\s\S]*select:\s*\{\s*authorId:\s*true,\s*createdByAdminId:\s*true\s*\}/);
+});
+
+test('admin-authored registrations do not require a bound mini-program user', () => {
+  const adminService = readFileSync(resolve(process.cwd(), 'src/modules/admin/admin.service.ts'), 'utf8');
+  assert.match(adminService, /type === 'posts'\s*\? ''\s*:\s*await this\.resolveActorUserIdForAdmin/);
+  assert.match(adminService, /authorName:\s*author\?\.name \?\? operator\.username/);
+});

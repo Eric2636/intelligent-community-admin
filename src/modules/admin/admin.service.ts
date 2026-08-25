@@ -44,6 +44,7 @@ import {
 } from './admin-login-security';
 import { AdminSessionReplacedError, openAdminSession } from './admin-session';
 import type { AdminCreateContentDto, AdminUpdateContentDto } from './admin.dto';
+import { ADMIN_FORUM_AUTHOR_ID, assertAdminCanModifyBatch, canAdminModifyContent, isAdminForumAuthor } from './admin-content-ownership';
 
 type AdminTokenPayload = {
   sub: string;
@@ -73,6 +74,7 @@ function randomAdminPassword(length = 14): string {
 
 export type AdminOperator = {
   adminId: string;
+  username?: string;
   role: 'ADMIN' | 'SUPERADMIN';
 };
 
@@ -120,7 +122,6 @@ const MAX_TASK_VIDEOS = 2;
 
 const FORUM_POST_TYPE_SET = new Set(['NORMAL', 'ANNOUNCEMENT']);
 const FORUM_POST_FEATURE_TYPE_SET = new Set(['CONTENT', 'REGISTRATION']);
-const ADMIN_ANNOUNCEMENT_AUTHOR_ID = '__admin_announcement__';
 
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
@@ -866,10 +867,10 @@ export class AdminService {
     if (type === 'posts') {
       const row = await prisma.forumPost.findFirst({
         where: { id, ...contentNotDeleted },
-        select: { authorId: true },
+        select: { authorId: true, createdByAdminId: true },
       });
       if (!row) throw new HttpError(404, '内容不存在');
-      await this.assertCanModifyContent(operator, type, row.authorId);
+      await this.assertCanModifyContent(operator, type, row.authorId, row.createdByAdminId);
       const updated = await prisma.forumPost.update({ where: { id }, data });
       await invalidateForumPostListCache();
       return updated;
@@ -1032,9 +1033,9 @@ export class AdminService {
   async getForumRegistrationEntries(postIdRaw: string, operator: AdminOperator) {
     const postId = postIdRaw.trim();
     if (!postId) throw new HttpError(400, 'id 不能为空');
-    const post = await prisma.forumPost.findFirst({ where: { id: postId, featureType: 'REGISTRATION', ...contentNotDeleted }, select: { authorId: true } });
+    const post = await prisma.forumPost.findFirst({ where: { id: postId, featureType: 'REGISTRATION', ...contentNotDeleted }, select: { authorId: true, createdByAdminId: true } });
     if (!post) throw new HttpError(404, '报名活动不存在');
-    await this.assertCanModifyContent(operator, 'posts', post.authorId);
+    await this.assertCanModifyContent(operator, 'posts', post.authorId, post.createdByAdminId);
     const entries = await prisma.forumPostRegistrationEntry.findMany({ where: { postId }, orderBy: { createdAt: 'asc' } });
     const users = await prisma.user.findMany({ where: { id: { in: entries.map((entry) => entry.userId) } }, select: { id: true, name: true, avatar: true, phoneNumber: true } });
     const byId = new Map(users.map((user) => [user.id, user]));
@@ -1069,34 +1070,18 @@ export class AdminService {
         select: { boundUserId: true },
       });
       const bound = admin?.boundUserId?.trim();
-      if (!bound) throw new HttpError(403, '未绑定小程序用户，无法批量操作');
       if (type === 'posts') {
-        const bad = await prisma.forumPost.count({
-          where: {
-            id: { in: contentIds },
-            ...contentNotDeleted,
-            authorId: { not: bound },
-          },
-        });
-        if (bad > 0) throw new HttpError(403, '批量操作中包含非本人发布的内容');
+        const rows = await prisma.forumPost.findMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, select: { authorId: true, createdByAdminId: true } });
+        if (rows.length !== new Set(contentIds).size) throw new HttpError(404, '批量操作中包含不存在的内容');
+        assertAdminCanModifyBatch({ role: operator.role, adminId: operator.adminId, boundUserId: bound, type, rows: rows.map((row) => ({ ownerUserId: row.authorId, createdByAdminId: row.createdByAdminId })) });
       } else if (type === 'items') {
-        const bad = await prisma.mallItem.count({
-          where: {
-            id: { in: contentIds },
-            ...contentNotDeleted,
-            publisherId: { not: bound },
-          },
-        });
-        if (bad > 0) throw new HttpError(403, '批量操作中包含非本人发布的内容');
+        const rows = await prisma.mallItem.findMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, select: { publisherId: true } });
+        if (rows.length !== new Set(contentIds).size) throw new HttpError(404, '批量操作中包含不存在的内容');
+        assertAdminCanModifyBatch({ role: operator.role, adminId: operator.adminId, boundUserId: bound, type, rows: rows.map((row) => ({ ownerUserId: row.publisherId })) });
       } else {
-        const bad = await prisma.task.count({
-          where: {
-            id: { in: contentIds },
-            ...contentNotDeleted,
-            publisherId: { not: bound },
-          },
-        });
-        if (bad > 0) throw new HttpError(403, '批量操作中包含非本人发布的内容');
+        const rows = await prisma.task.findMany({ where: { id: { in: contentIds }, ...contentNotDeleted }, select: { publisherId: true } });
+        if (rows.length !== new Set(contentIds).size) throw new HttpError(404, '批量操作中包含不存在的内容');
+        assertAdminCanModifyBatch({ role: operator.role, adminId: operator.adminId, boundUserId: bound, type, rows: rows.map((row) => ({ ownerUserId: row.publisherId })) });
       }
     }
 
@@ -1281,6 +1266,7 @@ export class AdminService {
     operator: AdminOperator,
     type: 'posts' | 'items' | 'tasks',
     ownerUserId: string,
+    createdByAdminId?: string | null,
   ) {
     if (operator.role === 'SUPERADMIN') return;
     const admin = await prisma.adminUser.findUnique({
@@ -1288,12 +1274,8 @@ export class AdminService {
       select: { boundUserId: true },
     });
     const bound = admin?.boundUserId?.trim();
-    if (!bound) {
-      throw new HttpError(403, '未绑定小程序用户，无法操作他人发布的内容');
-    }
-    if (!ownerUserId || ownerUserId !== bound) {
-      throw new HttpError(403, '只能操作本人绑定用户所发布的内容');
-    }
+    if (!canAdminModifyContent({ role: operator.role, adminId: operator.adminId, boundUserId: bound, type, ownerUserId, createdByAdminId }))
+      throw new HttpError(403, type === 'posts' && isAdminForumAuthor(ownerUserId) ? '只能操作自己在后台发布的留言' : '只能操作本人绑定用户所发布的内容');
   }
 
   private async resolveActorUserIdForAdmin(
@@ -1374,7 +1356,7 @@ export class AdminService {
     const postType = type === 'posts' ? parseForumPostType(dto.postType) : 'NORMAL';
     const featureType = type === 'posts' ? parseForumPostFeatureType(dto.featureType) : 'CONTENT';
     if (type === 'posts') assertForumPostTypeFeatureType(postType, featureType);
-    const actorId = postType === 'ANNOUNCEMENT' ? '' : await this.resolveActorUserIdForAdmin(dto.actorUserId, operator);
+    const actorId = type === 'posts' ? '' : await this.resolveActorUserIdForAdmin(dto.actorUserId, operator);
     const mediaUploaderId = await this.resolveUploadOwnerId(operator);
     const vis = dto.visibility ?? 'ONLINE';
     const pin = dto.pinned ?? false;
@@ -1405,8 +1387,8 @@ export class AdminService {
             images: images.length ? jsonMedia(images) : undefined,
             videos: videos.length ? jsonMedia(videos) : undefined,
             // 公告由后台管理员直接发布，不对应任意真实小程序用户。
-            authorId: actorId || ADMIN_ANNOUNCEMENT_AUTHOR_ID,
-            authorName: author?.name ?? (postType === 'ANNOUNCEMENT' ? '系统公告' : ''),
+            authorId: actorId || ADMIN_FORUM_AUTHOR_ID,
+            authorName: author?.name ?? operator.username ?? '后台管理员',
             authorAvatar: author?.avatar ?? null,
             createdByAdminId: operator.adminId,
             postType,
@@ -1602,7 +1584,7 @@ export class AdminService {
           where: { id, ...contentNotDeleted },
         });
         if (!existing) throw new HttpError(404, '内容不存在');
-        await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing));
+        await this.assertCanModifyContent(operator, type, this.contentOwnerUserId(type, existing), existing.createdByAdminId);
         const data: Prisma.ForumPostUpdateInput = {};
         if (dto.title !== undefined) data.title = dto.title.trim();
         if (dto.content !== undefined) data.content = dto.content.trim();
@@ -1858,7 +1840,7 @@ export class AdminService {
       await prisma.$transaction(async (tx) => {
         const row = await tx.forumPost.findFirst({ where: { id, ...contentNotDeleted } });
         if (!row) throw new HttpError(404, '内容不存在');
-        await this.assertCanModifyContent(operator, type, row.authorId);
+        await this.assertCanModifyContent(operator, type, row.authorId, row.createdByAdminId);
         const replies = await tx.forumReply.findMany({ where: { postId: id }, select: { images: true, videos: true } });
         const attachments = await tx.forumPostAttachment.findMany({ where: { postId: id }, select: { mediaAssetId: true } });
         await tx.forumPost.update({ where: { id }, data: { deletedAt: now } });

@@ -21,14 +21,13 @@ import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
 import { assertForumPostTypeFeatureType, registrationStatus } from './forum-feature';
 import { assertForumAttachmentsAvailable, forumAttachmentIds, replaceForumPostAttachments } from './forum-attachments';
+import { isAdminForumAuthor } from '../admin/admin-content-ownership';
 
 const MAX_POST_IMAGES = 9;
 const MAX_POST_VIDEOS = 2;
 const MAX_REPLY_IMAGES = 6;
 const MAX_REPLY_VIDEOS = 2;
 const MAX_POST_ATTACHMENTS = 5;
-const ADMIN_ANNOUNCEMENT_AUTHOR_ID = '__admin_announcement__';
-
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
 }
@@ -581,7 +580,7 @@ export class ForumService {
       });
       const notificationRecipientId = parent?.authorId ?? post.authorId;
       // 后台公告没有对应小程序用户，不能向保留发布者标识创建通知。
-      if (notificationRecipientId !== ADMIN_ANNOUNCEMENT_AUTHOR_ID) {
+      if (!isAdminForumAuthor(notificationRecipientId)) {
         await notify(tx, {
           recipientId: notificationRecipientId,
           actorId: params.userId,
@@ -1146,7 +1145,7 @@ export class ForumService {
   ) {
     const images = Array.isArray(p.images) ? p.images : (p.images ?? []);
     const videos = Array.isArray(p.videos) ? p.videos : (p.videos ?? []);
-    const isAdminAnnouncement = p.postType === 'ANNOUNCEMENT' && p.authorId === '__admin_announcement__';
+    const isAdminAnnouncement = isAdminForumAuthor(p.authorId);
     return {
       _id: p.id,
       id: p.id,

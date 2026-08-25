@@ -19,13 +19,15 @@ import { avatarOrDefault } from '../user/default-avatar';
 import { effectiveUserTag, resolveEffectiveUserTags, type EffectiveUserTag } from '../user/user-identity';
 import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 import { isAllowedReplyEmoji } from './forum-reply-emoji';
+import { assertForumPostTypeFeatureType, registrationStatus } from './forum-feature';
+import { assertForumAttachmentsAvailable, forumAttachmentIds, replaceForumPostAttachments } from './forum-attachments';
+import { isAdminForumAuthor } from '../admin/admin-content-ownership';
 
 const MAX_POST_IMAGES = 9;
 const MAX_POST_VIDEOS = 2;
 const MAX_REPLY_IMAGES = 6;
 const MAX_REPLY_VIDEOS = 2;
-const ADMIN_ANNOUNCEMENT_AUTHOR_ID = '__admin_announcement__';
-
+const MAX_POST_ATTACHMENTS = 5;
 function jsonMedia(arr: string[]): Prisma.InputJsonValue {
   return arr as unknown as Prisma.InputJsonValue;
 }
@@ -142,9 +144,12 @@ export class ForumService {
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
 
-    const tags = await resolveEffectiveUserTags(this.database, [...pinnedRows, ...listRows].map((row) => row.authorId));
+    const [tags, registrations] = await Promise.all([
+      resolveEffectiveUserTags(this.database, [...pinnedRows, ...listRows].map((row) => row.authorId)),
+      this.getRegistrationSummaries(uniqueIds, userId || ''),
+    ]);
     const mapOne = (p: (typeof pinnedRows)[number]) =>
-      this.mapPostListItem(p, userId || '', likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId));
+      this.mapPostListItem(p, userId || '', likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId), registrations.get(p.id));
 
     return {
       pinned: pinnedRows.map(mapOne),
@@ -183,8 +188,11 @@ export class ForumService {
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
 
-    const tags = await resolveEffectiveUserTags(this.database, rows.map((row) => row.authorId));
-    return rows.map((p) => this.mapPostListItem(p, params.userId || '', likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId)));
+    const [tags, registrations] = await Promise.all([
+      resolveEffectiveUserTags(this.database, rows.map((row) => row.authorId)),
+      this.getRegistrationSummaries(ids, params.userId || ''),
+    ]);
+    return rows.map((p) => this.mapPostListItem(p, params.userId || '', likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId), registrations.get(p.id)));
   }
 
   async getPostDetail(params: { userId?: string; postId: string }) {
@@ -206,7 +214,7 @@ export class ForumService {
     if (!row) throw new HttpError(404, '帖子不存在');
 
     const replyKey = await forumPostRepliesDataCacheKey(id);
-    const [replyRowsRaw, liked, favorited] = await Promise.all([
+    const [replyRowsRaw, liked, attachments, favorited] = await Promise.all([
       cacheAsideJson(replyKey, FORUM_POST_REPLIES_TTL_SEC, async () =>
         prisma.forumReply.findMany({
           where: { postId: id },
@@ -219,6 +227,11 @@ export class ForumService {
             select: { id: true },
           })
         : Promise.resolve(null),
+      prisma.forumPostAttachment.findMany({
+        where: { postId: id },
+        include: { mediaAsset: { select: { id: true, url: true, originalName: true, contentType: true, sizeBytes: true } } },
+        orderBy: { sortOrder: 'asc' },
+      }),
       userId
         ? prisma.forumPostFavorite.findUnique({
             where: { postId_userId: { postId: id, userId } },
@@ -228,10 +241,31 @@ export class ForumService {
     ]);
 
     const replyRows = this.reviveForumReplyRows(replyRowsRaw);
+    const registration = row.featureType === 'REGISTRATION'
+      ? await prisma.forumPostRegistration.findUnique({ where: { postId: id }, include: { entries: { select: { userId: true } } } })
+      : null;
     const tags = await resolveEffectiveUserTags(this.database, [row.authorId]);
     const detail = this.mapPostDetail(row, userId, Boolean(liked), Boolean(favorited), tags.get(row.authorId));
     return {
       ...detail,
+      registration: registration
+        ? {
+            capacity: registration.capacity,
+            registeredCount: registration.entries.length,
+            remainingCount: Math.max(0, registration.capacity - registration.entries.length),
+            deadlineAt: registration.deadlineAt.toISOString(),
+            status: registrationStatus({ deadlineAt: registration.deadlineAt, capacity: registration.capacity, registeredCount: registration.entries.length }),
+            isRegistered: registration.entries.some((entry) => entry.userId === userId),
+          }
+        : null,
+      attachments: attachments.map((attachment) => ({
+        id: attachment.id,
+        mediaAssetId: attachment.mediaAsset.id,
+        name: attachment.mediaAsset.originalName || '附件',
+        sizeBytes: attachment.mediaAsset.sizeBytes || 0,
+        contentType: attachment.mediaAsset.contentType || '',
+        url: attachment.mediaAsset.url,
+      })),
       replies: await this.buildFlatRepliesWithMeta(userId, replyRows),
     };
   }
@@ -247,6 +281,7 @@ export class ForumService {
       if (!post) throw new HttpError(404, '帖子不存在');
       if (post.authorId !== params.userId) throw new HttpError(403, '仅能删除自己的帖子');
       const replies = await tx.forumReply.findMany({ where: { postId: id }, select: { images: true, videos: true } });
+      const attachments = await tx.forumPostAttachment.findMany({ where: { postId: id }, select: { mediaAssetId: true } });
       await tx.forumPost.update({
         where: { id },
         data: { deletedAt: new Date() },
@@ -260,9 +295,55 @@ export class ForumService {
           ...mediaUrls(reply.videos),
         ]),
       ]);
+      await tx.forumPostAttachment.deleteMany({ where: { postId: id } });
+      if (attachments.length) {
+        await tx.mediaAsset.updateMany({
+          where: { id: { in: attachments.map((attachment) => attachment.mediaAssetId) }, state: { in: ['PENDING', 'ATTACHED', 'DELETE_FAILED'] } },
+          data: { state: 'DELETE_PENDING', deleteRequestedAt: new Date(), lastDeleteError: null },
+        });
+      }
     });
     await Promise.all([invalidateForumPostListCache(), invalidateForumPostRepliesCache(id)]);
     return {};
+  }
+
+  async setPinned(params: { userId: string; postId: string; pinned: boolean }) {
+    const id = String(params.postId || '').trim();
+    if (!id) throw new HttpError(400, 'postId 不能为空');
+    const admin = await prisma.adminUser.findFirst({ where: { boundUserId: params.userId, enabled: true }, select: { id: true } });
+    if (!admin) throw new HttpError(403, '仅管理员可以置顶帖子');
+    const post = await prisma.forumPost.findFirst({ where: { id, visibility: 'ONLINE', ...contentNotDeleted } });
+    if (!post) throw new HttpError(404, '帖子不存在');
+    if (post.authorId !== params.userId) throw new HttpError(403, '仅发布该帖的管理员可以置顶');
+    await prisma.forumPost.update({ where: { id }, data: { pinned: params.pinned } });
+    await invalidateForumPostListCache();
+    return { pinned: params.pinned };
+  }
+
+  async assertCanManageAttachments(userId: string) {
+    const admin = await prisma.adminUser.findFirst({ where: { boundUserId: userId, enabled: true }, select: { id: true } });
+    if (!admin) throw new HttpError(403, '仅管理员可以上传帖子附件');
+    return admin;
+  }
+
+  async getRegistrationEntries(params: { userId: string; postId: string }) {
+    const id = String(params.postId || '').trim();
+    if (!id) throw new HttpError(400, 'postId 不能为空');
+    const admin = await prisma.adminUser.findFirst({ where: { boundUserId: params.userId, enabled: true }, select: { id: true } });
+    if (!admin) throw new HttpError(403, '仅管理员可以查看报名名单');
+    const post = await prisma.forumPost.findFirst({ where: { id, featureType: 'REGISTRATION', ...contentNotDeleted }, select: { authorId: true } });
+    if (!post) throw new HttpError(404, '报名活动不存在');
+    if (post.authorId !== params.userId) throw new HttpError(403, '仅发布该帖的管理员可以查看报名名单');
+    const entries = await prisma.forumPostRegistrationEntry.findMany({ where: { postId: id }, orderBy: { createdAt: 'asc' } });
+    const users = await prisma.user.findMany({ where: { id: { in: entries.map((entry) => entry.userId) } }, select: { id: true, name: true, avatar: true, phoneNumber: true } });
+    const usersById = new Map(users.map((user) => [user.id, user]));
+    return {
+      total: entries.length,
+      list: entries.map((entry) => {
+        const user = usersById.get(entry.userId);
+        return { userId: entry.userId, name: user?.name ?? '', avatar: avatarOrDefault(user?.avatar), phoneNumber: user?.phoneNumber ?? '', createdAt: entry.createdAt.toISOString() };
+      }),
+    };
   }
 
   async deleteReply(params: { userId: string; postId: string; replyId: string }) {
@@ -293,7 +374,19 @@ export class ForumService {
     return {};
   }
 
-  async publishPost(params: { userId: string; title: string; content: string; images?: string[]; videos?: string[] }) {
+  async publishPost(params: {
+    userId: string;
+    title: string;
+    content: string;
+    images?: string[];
+    videos?: string[];
+    postType?: 'NORMAL' | 'ANNOUNCEMENT';
+    featureType?: 'CONTENT' | 'REGISTRATION';
+    registrationCapacity?: number;
+    registrationDeadlineAt?: string;
+    pinned?: boolean;
+    attachments?: { mediaAssetId: string }[];
+  }) {
     const title = String(params.title || '').trim();
     const content = String(params.content || '').trim();
     const images = parseStrictMediaUrlList(params.images, MAX_POST_IMAGES, 'image', 'images');
@@ -301,6 +394,27 @@ export class ForumService {
     if (!title) throw new HttpError(400, '请输入标题');
     if (!content && images.length === 0 && videos.length === 0) {
       throw new HttpError(400, '请输入内容或添加图片/视频');
+    }
+    const postType = params.postType || 'NORMAL';
+    const featureType = params.featureType || 'CONTENT';
+    const attachmentIds = params.attachments === undefined ? [] : forumAttachmentIds(params.attachments);
+    assertForumPostTypeFeatureType(postType, featureType);
+    const announcementValidUntil = postType === 'ANNOUNCEMENT'
+      ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+      : null;
+    const requiresAdmin = postType !== 'NORMAL' || featureType !== 'CONTENT' || Boolean(params.pinned) || attachmentIds.length > 0;
+    const boundAdmin = requiresAdmin
+      ? await prisma.adminUser.findFirst({ where: { boundUserId: params.userId, enabled: true }, select: { id: true } })
+      : null;
+    if (requiresAdmin && !boundAdmin) throw new HttpError(403, '仅管理员可以发布公告、报名帖或置顶帖子');
+    const registrationDeadlineAt = params.registrationDeadlineAt ? new Date(params.registrationDeadlineAt) : null;
+    if (featureType === 'REGISTRATION') {
+      if (!Number.isInteger(params.registrationCapacity) || Number(params.registrationCapacity) < 1) {
+        throw new HttpError(400, '请设置报名人数上限');
+      }
+      if (!registrationDeadlineAt || Number.isNaN(registrationDeadlineAt.getTime()) || registrationDeadlineAt.getTime() <= Date.now()) {
+        throw new HttpError(400, '报名截止时间必须晚于当前时间');
+      }
     }
 
     const row = await prisma.$transaction(async (tx) => {
@@ -318,8 +432,24 @@ export class ForumService {
           authorId: params.userId,
           authorName: author?.name ?? '邻居',
           authorAvatar: author?.avatar ?? null,
+          createdByAdminId: boundAdmin?.id,
+          postType,
+          featureType,
+          validUntil: announcementValidUntil,
+          pinned: Boolean(params.pinned),
         },
       });
+      if (attachmentIds.length) {
+        const activeAdmin = await tx.adminUser.findFirst({ where: { boundUserId: params.userId, enabled: true }, select: { id: true } });
+        if (!activeAdmin) throw new HttpError(403, '管理员账号已停用，无法关联附件');
+        await assertForumAttachmentsAvailable(tx, { uploaderId: params.userId, mediaAssetIds: attachmentIds });
+        await replaceForumPostAttachments(tx, { postId: row.id, mediaAssetIds: attachmentIds });
+      }
+      if (featureType === 'REGISTRATION') {
+        await tx.forumPostRegistration.create({
+          data: { postId: row.id, capacity: Number(params.registrationCapacity), deadlineAt: registrationDeadlineAt! },
+        });
+      }
       const media = configuredMediaAssetService(tx);
       await media?.attachUrls(tx, { uploaderId: params.userId, urls: [...images, ...videos] });
       return row;
@@ -327,6 +457,46 @@ export class ForumService {
     await invalidateForumPostListCache();
     const tags = await resolveEffectiveUserTags(this.database, [params.userId]);
     return this.mapPostDetail(row, params.userId, false, false, tags.get(params.userId));
+  }
+
+  async updatePost(params: {
+    userId: string;
+    postId: string;
+    title?: string;
+    content?: string;
+    images?: string[];
+    videos?: string[];
+    attachments?: { mediaAssetId: string }[];
+  }) {
+    await this.assertCanManageAttachments(params.userId);
+    const id = String(params.postId || '').trim();
+    if (!id) throw new HttpError(400, 'postId 不能为空');
+    const current = await prisma.forumPost.findFirst({ where: { id, authorId: params.userId, visibility: 'ONLINE', ...contentNotDeleted } });
+    if (!current) throw new HttpError(403, '仅能编辑自己发布的管理员帖子');
+    const title = params.title === undefined ? current.title : String(params.title).trim();
+    const content = params.content === undefined ? current.content : String(params.content).trim();
+    const images = params.images === undefined ? mediaUrls(current.images) : parseStrictMediaUrlList(params.images, MAX_POST_IMAGES, 'image', 'images');
+    const videos = params.videos === undefined ? mediaUrls(current.videos) : parseStrictMediaUrlList(params.videos, MAX_POST_VIDEOS, 'video', 'videos');
+    if (!title) throw new HttpError(400, '请输入标题');
+    if (!content && images.length === 0 && videos.length === 0) throw new HttpError(400, '请输入内容或添加图片/视频');
+    const attachmentIds = params.attachments === undefined ? undefined : forumAttachmentIds(params.attachments);
+    const updated = await prisma.$transaction(async (tx) => {
+      const activeAdmin = await tx.adminUser.findFirst({ where: { boundUserId: params.userId, enabled: true }, select: { id: true } });
+      if (!activeAdmin) throw new HttpError(403, '管理员账号已停用，无法编辑帖子');
+      const row = await tx.forumPost.findFirst({ where: { id, authorId: params.userId, visibility: 'ONLINE', ...contentNotDeleted } });
+      if (!row) throw new HttpError(403, '仅能编辑自己发布的管理员帖子');
+      const result = await tx.forumPost.update({ where: { id }, data: { title, content, images: jsonMedia(images), videos: jsonMedia(videos) } });
+      if (attachmentIds !== undefined) {
+        await assertForumAttachmentsAvailable(tx, { uploaderId: params.userId, mediaAssetIds: attachmentIds, postId: id });
+        await replaceForumPostAttachments(tx, { postId: id, mediaAssetIds: attachmentIds });
+      }
+      const media = configuredMediaAssetService(tx);
+      await media?.attachUrls(tx, { uploaderId: params.userId, urls: [...images, ...videos] });
+      await media?.requestDeleteUrls(tx, [...mediaUrls(current.images), ...mediaUrls(current.videos)].filter((url) => ![...images, ...videos].includes(url)));
+      return result;
+    });
+    await invalidateForumPostListCache();
+    return updated;
   }
 
   async publishReply(params: {
@@ -410,7 +580,7 @@ export class ForumService {
       });
       const notificationRecipientId = parent?.authorId ?? post.authorId;
       // 后台公告没有对应小程序用户，不能向保留发布者标识创建通知。
-      if (notificationRecipientId !== ADMIN_ANNOUNCEMENT_AUTHOR_ID) {
+      if (!isAdminForumAuthor(notificationRecipientId)) {
         await notify(tx, {
           recipientId: notificationRecipientId,
           actorId: params.userId,
@@ -733,7 +903,6 @@ export class ForumService {
       where: {
         authorId: params.userId,
         visibility: 'ONLINE',
-        postType: 'NORMAL',
         ...contentNotDeleted,
       },
       orderBy: { createdAt: 'desc' },
@@ -751,8 +920,35 @@ export class ForumService {
     ]);
     const likedSet = new Set(liked.map((x) => x.postId));
     const favSet = new Set(favorited.map((x) => x.postId));
-    const tags = await resolveEffectiveUserTags(this.database, rows.map((row) => row.authorId));
-    return rows.map((p) => this.mapPostListItem(p, params.userId, likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId)));
+    const [tags, registrations] = await Promise.all([
+      resolveEffectiveUserTags(this.database, rows.map((row) => row.authorId)),
+      this.getRegistrationSummaries(ids, params.userId),
+    ]);
+    return rows.map((p) => this.mapPostListItem(p, params.userId, likedSet.has(p.id), favSet.has(p.id), tags.get(p.authorId), registrations.get(p.id)));
+  }
+
+  private async getRegistrationSummaries(postIds: string[], userId: string) {
+    if (postIds.length === 0) return new Map<string, ReturnType<typeof this.toRegistrationSummary>>();
+    const registrations = await prisma.forumPostRegistration.findMany({
+      where: { postId: { in: postIds } },
+      include: { entries: { select: { userId: true } } },
+    });
+    return new Map(registrations.map((registration) => [registration.postId, this.toRegistrationSummary(registration, userId)]));
+  }
+
+  private toRegistrationSummary(
+    registration: { capacity: number; deadlineAt: Date; entries: { userId: string }[] },
+    userId: string,
+  ) {
+    const registeredCount = registration.entries.length;
+    return {
+      capacity: registration.capacity,
+      registeredCount,
+      remainingCount: Math.max(0, registration.capacity - registeredCount),
+      deadlineAt: registration.deadlineAt.toISOString(),
+      status: registrationStatus({ deadlineAt: registration.deadlineAt, capacity: registration.capacity, registeredCount }),
+      isRegistered: Boolean(userId) && registration.entries.some((entry) => entry.userId === userId),
+    };
   }
 
   private async getReplyReactionSnapshot(replyId: string, userId: string) {
@@ -932,6 +1128,7 @@ export class ForumService {
       authorName: string | null;
       authorAvatar?: string | null;
       postType?: string | null;
+      featureType?: string | null;
       validUntil?: Date | null;
       pinned?: boolean;
       viewCount?: number;
@@ -944,10 +1141,11 @@ export class ForumService {
     isLiked: boolean,
     isFavorited: boolean,
     tag: EffectiveUserTag = effectiveUserTag(null),
+    registration?: ReturnType<typeof this.toRegistrationSummary>,
   ) {
     const images = Array.isArray(p.images) ? p.images : (p.images ?? []);
     const videos = Array.isArray(p.videos) ? p.videos : (p.videos ?? []);
-    const isAdminAnnouncement = p.postType === 'ANNOUNCEMENT' && p.authorId === '__admin_announcement__';
+    const isAdminAnnouncement = isAdminForumAuthor(p.authorId);
     return {
       _id: p.id,
       id: p.id,
@@ -962,6 +1160,8 @@ export class ForumService {
       userTagLabel: isAdminAnnouncement ? '' : tag.label,
       userTagType: isAdminAnnouncement ? '' : tag.type,
       postType: p.postType ?? 'NORMAL',
+      featureType: p.featureType ?? 'CONTENT',
+      registration: registration ?? null,
       validUntil: p.validUntil ? p.validUntil.toISOString() : '',
       viewCount: p.viewCount ?? 0,
       shareCount: p.shareCount ?? 0,
@@ -987,6 +1187,7 @@ export class ForumService {
       authorName: string | null;
       authorAvatar?: string | null;
       postType?: string | null;
+      featureType?: string | null;
       validUntil?: Date | null;
       pinned?: boolean;
       viewCount?: number;

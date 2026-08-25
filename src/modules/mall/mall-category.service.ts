@@ -115,7 +115,7 @@ export class MallCategoryService {
     if (!id) throw new HttpError(400, '分类 id 不能为空');
     await this.getCategory(id);
     const usedRows = await prisma.$queryRaw<Array<{ count: bigint }>>`
-      SELECT COUNT(*) AS count FROM MallItem WHERE categoryId = ${id}
+      SELECT COUNT(*) AS count FROM mall_items WHERE categoryId = ${id}
     `;
     if (Number(usedRows[0]?.count || 0) > 0) {
       throw new HttpError(400, '该分类已有商品使用，不能删除，请改为停用');

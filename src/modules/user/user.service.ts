@@ -40,11 +40,16 @@ export class UserService {
       },
     });
     if (!user) throw new HttpError(404, '用户不存在');
-    const tag = (await resolveEffectiveUserTags(prisma, [userId])).get(userId) ?? { label: '', type: '' };
+    const [tag, admin] = await Promise.all([
+      resolveEffectiveUserTags(prisma, [userId]),
+      prisma.adminUser.findFirst({ where: { boundUserId: userId, enabled: true }, select: { id: true } }),
+    ]);
+    const effectiveTag = tag.get(userId) ?? { label: '', type: '' };
     return {
       ...user,
-      userTagLabel: tag.label,
-      userTagType: tag.type,
+      userTagLabel: effectiveTag.label,
+      userTagType: effectiveTag.type,
+      canManageForumPosts: Boolean(admin),
     };
   }
 

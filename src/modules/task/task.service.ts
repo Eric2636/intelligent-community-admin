@@ -18,7 +18,7 @@ import { lockUsersForProfileSnapshot } from '../user/user-profile-sync';
 const MAX_TASK_IMAGES = 9;
 const MAX_TASK_VIDEOS = 2;
 
-type TaskDatabase = Pick<PrismaClient, '$transaction'>;
+type TaskDatabase = Pick<PrismaClient, '$transaction' | 'task' | 'user' | 'adminUser'>;
 
 function taskNotificationContent(taskTitle: string, action: string) {
   const title = Array.from(String(taskTitle || '').trim()).slice(0, 80).join('');
@@ -49,7 +49,7 @@ export class TaskService {
   async getTaskDetail(taskId: string) {
     const id = String(taskId || '').trim();
     if (!id) throw new HttpError(400, 'taskId 不能为空');
-    const row = await prisma.task.findFirst({
+    const row = await this.database.task.findFirst({
       where: { id, visibility: 'ONLINE', ...contentNotDeleted },
     });
     if (!row) throw new HttpError(404, '任务不存在');
@@ -79,7 +79,7 @@ export class TaskService {
 
     const images = parseStrictMediaUrlList(params.images, MAX_TASK_IMAGES, 'image', 'images');
     const videos = parseStrictMediaUrlList(params.videos, MAX_TASK_VIDEOS, 'video', 'videos');
-    const row = await prisma.$transaction(async (tx) => {
+    const row = await this.database.$transaction(async (tx) => {
       await lockUsersForProfileSnapshot(tx, [params.publisherId]);
       const publisher = await tx.user.findUnique({
         where: { id: params.publisherId },
@@ -255,7 +255,7 @@ export class TaskService {
         where.title = { contains: keyword.trim() };
       }
 
-      const rows = await prisma.task.findMany({
+      const rows = await this.database.task.findMany({
         where,
         orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
         skip,
@@ -287,7 +287,7 @@ export class TaskService {
       where.status = { notIn: [TaskStatus.DRAFT, TaskStatus.CANCELLED] };
     }
 
-    const rows = await prisma.task.findMany({
+    const rows = await this.database.task.findMany({
       where,
       orderBy: { createdAt: 'desc' },
     });
@@ -667,12 +667,12 @@ export class TaskService {
   }
 
   private async mapTaskWithCurrentTag(t: Parameters<TaskService['mapTask']>[0]) {
-    const tags = await resolveEffectiveUserTags(prisma, [t.publisherId]);
+    const tags = await resolveEffectiveUserTags(this.database, [t.publisherId]);
     return this.mapTask(t, tags.get(t.publisherId));
   }
 
   private async mapTaskList(rows: Parameters<TaskService['mapTask']>[0][]) {
-    const tags = await resolveEffectiveUserTags(prisma, rows.map((row) => row.publisherId));
+    const tags = await resolveEffectiveUserTags(this.database, rows.map((row) => row.publisherId));
     return rows.map((row) => this.mapTask(row, tags.get(row.publisherId)));
   }
 
